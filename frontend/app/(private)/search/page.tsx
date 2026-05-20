@@ -35,6 +35,8 @@ export default function DashboardSearchMock() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
   const [businessName, setBusinessName] = useState("");
   const [sources, setSources] = useState<{ id: number; filename: string }[]>([]);
   console.log(docs)
@@ -93,15 +95,57 @@ export default function DashboardSearchMock() {
     setLoading(true);
     setAnswer("");
 
+    const initialOffset = 0;
+    setOffset(0); // 🔥 reset pagination
+
     try {
       const res = await fetch("http://localhost:8000/ask", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        credentials: "include", // IMPORTANT for get_current_user auth
+        credentials: "include",
         body: JSON.stringify({
-          question: question,
+          question,
+          get_k: 3,
+          offset: initialOffset,
+        }),
+      });
+
+      const data = await res.json();
+      console.log(data,"data")
+
+      setAnswer(data.answer);
+      setSources(data.sources || []);
+
+      setHasMore(data.hasMore ?? false);
+
+    } catch (err) {
+      console.error(err);
+      setAnswer("Something went wrong while searching.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleLoadMore = async () => {
+    if (!question.trim()) return;
+
+    setLoading(true);
+
+    const nextOffset = offset + 3; // match get_k
+
+    try {
+      const res = await fetch("http://localhost:8000/ask", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
+        body: JSON.stringify({
+          question,
+          get_k: 3,
+          offset: nextOffset,
         }),
       });
 
@@ -110,8 +154,15 @@ export default function DashboardSearchMock() {
       }
 
       const data = await res.json();
+      console.log(answer,'this is answer')
       setAnswer(data.answer);
       setSources(data.sources || []);
+
+      // 🔥 update offset AFTER success
+      setOffset(nextOffset);
+
+      // optional: backend should control this
+      setHasMore(data.hasMore ?? false);
 
     } catch (err) {
       console.error(err);
@@ -322,6 +373,14 @@ export default function DashboardSearchMock() {
                     })}
 
                   </div>
+                  {hasMore && !loading && (
+                    <button
+                      onClick={handleLoadMore}
+                      className="mt-4 rounded-xl bg-zinc-800 border border-zinc-700 px-4 py-2 text-sm text-white hover:bg-zinc-700 transition"
+                    >
+                      Load More
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

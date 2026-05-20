@@ -18,6 +18,7 @@ def build_prompt(question: str, chunks: List[dict]) -> str:
     context_blocks = []
 
     for i, chunk in enumerate(chunks, 1):
+        print(chunk)
         context_blocks.append(
             f"[{i}] FILE: {chunk['filename']}\n{chunk['text']}"
         )
@@ -57,7 +58,7 @@ def call_openai(prompt: str) -> str:
         ],
         temperature=0.2,
     )
-
+    print(response)
     return response.choices[0].message.content
 
 

@@ -168,7 +168,8 @@ def retrieve_chunks(
     db: Session,
     business_id: int,
     query: str,
-    top_k: int = 15,
+    get_k: int = 3,
+    offset: int = 0,
     document_ids: List[int] | None = None,
 ) -> List[dict]:
     """
@@ -199,7 +200,8 @@ def retrieve_chunks(
     params = {
         "query_vec": query_vector,
         "business_id": business_id,
-        "top_k": top_k,
+        "limit_plus_one": get_k + 1,
+        "offset": offset,
     }
 
     if document_ids:
@@ -216,11 +218,14 @@ def retrieve_chunks(
             WHERE c.business_id = :business_id
             {doc_filter}
             ORDER BY c.embedding <=> CAST(:query_vec AS vector)
-            LIMIT :top_k
+            LIMIT :limit_plus_one
+            OFFSET :offset
         """),
         params
     ).fetchall()
 
+    has_more = len(results) > get_k
+    results = results[:get_k]
     formatted_results = [
         {
             "text": row.text,
@@ -231,15 +236,11 @@ def retrieve_chunks(
         for row in results
     ]
 
-    # 5. Logging for debugging scores
-    print(f"\n--- RAG RETRIEVAL LOG ---")
-    print(f"ORIGINAL QUERY: {query}")
-    print(f"HYPOTHETICAL:   {hypothetical_answer}")
-    for i, res in enumerate(formatted_results):
-        print(f"Rank {i+1} [{res['score']}]: {res['text'][:70]}...")
-    print(f"--------------------------\n")
-
-    return formatted_results
+    return {
+        "results": formatted_results,
+        "hasMore": has_more,
+        "nextOffset": offset + get_k if has_more else None
+        }
 
 # ── Delete ─────────────────────────────────────────────────────────────────────
 def delete_document_chunks(db: Session, document_id: int) -> None:

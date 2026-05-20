@@ -18,6 +18,8 @@ from math import ceil
 
 class AskRequest(BaseModel):
     question: str
+    get_k: int
+    offset: int
 
 app = FastAPI()
 app.add_middleware(
@@ -143,25 +145,27 @@ def ask_question(
 ):
     user, business_id = current_context
 
-    # 1. Retrieve relevant chunks from pgvector
-    chunks = retrieve_chunks(
+    retrieval = retrieve_chunks(
         db=db,
         business_id=business_id,
         query=body.question,
-        top_k=15,
+        get_k=body.get_k,
+        offset=body.offset,
     )
+    print(retrieval)
 
-    # 2. If nothing found
+    chunks = retrieval["results"]
+
     if not chunks:
         return {
             "answer": "I couldn't find that in your documents.",
-            "sources": []
+            "sources": [],
+            "hasMore": retrieval["hasMore"],
+            "nextOffset": retrieval["nextOffset"],
         }
 
-    # 3. Generate LLM answer
     answer = generate_answer(body.question, chunks)
 
-    # 4. (Optional but recommended) log query
     db.add(QueryLog(
         business_id=business_id,
         query_text=body.question,
@@ -169,11 +173,12 @@ def ask_question(
     ))
     db.commit()
 
-    # 5. Return response + sources
     return {
         "answer": answer,
         "sources": list({c["filename"] for c in chunks}),
-        "chunks_used": len(chunks)
+        "chunks_used": len(chunks),
+        "hasMore": retrieval["hasMore"],
+        "nextOffset": retrieval["nextOffset"],
     }
 
 @app.delete("/documents/{document_id}")
