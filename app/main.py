@@ -144,7 +144,6 @@ def ask_question(
     current_context = Depends(get_current_user),
 ):
     user, business_id = current_context
-
     retrieval = retrieve_chunks(
         db=db,
         business_id=business_id,
@@ -165,7 +164,6 @@ def ask_question(
         }
 
     answer = generate_answer(body.question, chunks)
-
     db.add(QueryLog(
         business_id=business_id,
         query_text=body.question,
