@@ -144,6 +144,8 @@ def ask_question(
     current_context = Depends(get_current_user),
 ):
     user, business_id = current_context
+    print("CURRENT CONTEXT:", current_context)
+    print("BUSINESS ID:", business_id)
     retrieval = retrieve_chunks(
         db=db,
         business_id=business_id,

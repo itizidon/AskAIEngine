@@ -171,32 +171,18 @@ def retrieve_chunks(
     get_k: int = 3,
     offset: int = 0,
     document_ids: List[int] | None = None,
-) -> List[dict]:
-    """
-    Finds relevant chunks using HyDE (Hypothetical Document Embeddings).
-    This turns the question into a 'fake' answer first to improve vector matching.
-    """
-    # 1. Generate a hypothetical answer to 'prime' the vector search
-    # This helps bridge the gap between a user's question and the document's data.
-    hyde_response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system", 
-                "content": "Write a 1-sentence technical description that would answer the user's question."
-            },
-            {"role": "user", "content": query}
-        ],
-        temperature=0,
-    )
-    hypothetical_answer = hyde_response.choices[0].message.content
+) -> dict:
 
-    # 2. Embed the hypothetical answer instead of the raw question
     embedder = get_embedder()
-    query_vector = embedder.encode([hypothetical_answer], normalize_embeddings=True).tolist()[0]
 
-    # 3. Build the SQL filter
-    doc_filter = ""
+    # Generate normalized query embedding
+    query_vector = embedder.encode(
+        [query],
+        normalize_embeddings=True
+    ).tolist()[0]
+
+    print(query_vector,'query_vector')
+
     params = {
         "query_vec": query_vector,
         "business_id": business_id,
@@ -204,34 +190,57 @@ def retrieve_chunks(
         "offset": offset,
     }
 
+    doc_filter_sql = ""
     if document_ids:
-        doc_filter = "AND c.document_id = ANY(:doc_ids)"
+        doc_filter_sql = "AND c.document_id = ANY(:doc_ids)"
         params["doc_ids"] = document_ids
 
-    # 4. Execute vector similarity search
+    sql = f"""
+        SELECT
+            c.id,
+            c.text,
+            c.document_id,
+            d.filename,
+
+            -- cosine similarity
+            1 - (c.embedding <=> CAST(:query_vec AS vector)) AS score
+
+        FROM chunks c
+        JOIN documents d ON d.id = c.document_id
+
+        WHERE c.business_id = :business_id
+        {doc_filter_sql}
+
+        ORDER BY c.embedding <=> CAST(:query_vec AS vector)
+
+        LIMIT :limit_plus_one
+        OFFSET :offset
+    """
+
     results = db.execute(
-        text(f"""
-            SELECT c.id, c.text, c.document_id, d.filename,
-                   1 - (c.embedding <=> CAST(:query_vec AS vector)) AS score
-            FROM chunks c
-            JOIN documents d ON d.id = c.document_id
-            WHERE c.business_id = :business_id
-            {doc_filter}
-            ORDER BY c.embedding <=> CAST(:query_vec AS vector)
-            LIMIT :limit_plus_one
-            OFFSET :offset
-        """),
+        text(sql),
         params
     ).fetchall()
 
+    print("\n========== RETRIEVAL DEBUG ==========")
+    print("QUERY:", query)
+    print("RESULT COUNT:", len(results))
+
+    for r in results[:5]:
+        print("\n---")
+        print("score:", r.score)
+        print("filename:", r.filename)
+        print("text:", r.text[:200])
+
     has_more = len(results) > get_k
     results = results[:get_k]
+
     formatted_results = [
         {
             "text": row.text,
             "filename": row.filename,
             "document_id": row.document_id,
-            "score": round(row.score, 3),
+            "score": float(round(row.score, 4)),
         }
         for row in results
     ]
@@ -240,7 +249,7 @@ def retrieve_chunks(
         "results": formatted_results,
         "hasMore": has_more,
         "nextOffset": offset + get_k if has_more else None
-        }
+    }
 
 # ── Delete ─────────────────────────────────────────────────────────────────────
 def delete_document_chunks(db: Session, document_id: int) -> None:

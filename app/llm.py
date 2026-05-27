@@ -18,7 +18,6 @@ def build_prompt(question: str, chunks: List[dict]) -> str:
     context_blocks = []
 
     for i, chunk in enumerate(chunks, 1):
-        print(chunk)
         context_blocks.append(
             f"[{i}] FILE: {chunk['filename']}\n{chunk['text']}"
         )
@@ -26,27 +25,50 @@ def build_prompt(question: str, chunks: List[dict]) -> str:
     context = "\n\n---\n\n".join(context_blocks)
 
     return f"""
-    You are a helpful assistant answering questions using ONLY the provided context.
+You are a retrieval assistant.
 
-    Rules:
-    - If the answer is not in the context, say: "I couldn't find that in your documents."
-    - Do NOT hallucinate.
-    - When answering, reference sources using their number AND filename when helpful.
+Answer the user's question using ONLY the provided context.
 
-    Good example:
-    "The RAM is manufactured by Corsair (see [1] RAM_Specs.pdf)."
+IMPORTANT RULES:
+- Return ONLY valid JSON.
+- Do NOT include markdown.
+- Do NOT include explanations outside the JSON.
+- If the answer is not found, return:
+{{
+  "answers": []
+}}
 
-    Bad example:
-    "Source 1 says..."
+Return format:
+{{
+  "answers": [
+    {{
+      "fact": "short factual statement",
+      "sources": [
+        {{
+          "chunk": 1,
+          "filename": "example.pdf"
+        }}
+      ]
+    }}
+  ]
+}}
 
-    CONTEXT:
-    {context}
+Requirements:
+- Each distinct fact should be its own array item.
+- Combine duplicate facts.
+- Keep facts concise.
+- A fact may reference multiple chunks if needed.
+- Do not hallucinate.
+- NEVER combine numeric facts.
+- Each unique value must be its own fact.
+- Do not summarize multiple charges into one sentence.
 
-    QUESTION:
-    {question}
+CONTEXT:
+{context}
 
-    ANSWER:
-    """.strip()
+QUESTION:
+{question}
+""".strip()
 
 
 # ── OpenAI call ───────────────────────────────────────────────────────────────
@@ -64,5 +86,6 @@ def call_openai(prompt: str) -> str:
 
 # ── Public interface ───────────────────────────────────────────────────────────
 def generate_answer(question: str, chunks: List[dict]) -> str:
+    print(question)
     prompt = build_prompt(question, chunks)
     return call_openai(prompt)
