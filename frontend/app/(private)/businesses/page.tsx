@@ -13,7 +13,7 @@ type Business = {
 export default function SelectBusinessPage() {
   const router = useRouter();
   const { selectBusiness } = useBusiness();
-  console.log('hit here')
+  console.log('hit here', selectBusiness)
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

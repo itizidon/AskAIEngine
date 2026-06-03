@@ -16,6 +16,11 @@ import os
 import uuid
 from math import ceil
 
+class DocumentsRequest(BaseModel):
+    business_ids: List[int]
+    page: int = 1
+    page_size: int = 10
+
 class AskRequest(BaseModel):
     question: str
     get_k: int
@@ -94,29 +99,41 @@ async def upload_documents(
 from math import ceil
 from fastapi import Query
 
-@app.get("/documents")
+@app.post("/documents")
 def get_documents(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(10, ge=1, le=100),
+    body: DocumentsRequest,
     db: Session = Depends(get_db),
-    current_context = Depends(get_current_user),
+    current_context=Depends(get_current_user),
 ):
-    user, business_id = current_context
+    user, _ = current_context
 
-    if not business_id:
-        return {"error": "No business associated with user"}
+    # Security: ensure user actually has access to these businesses
+    allowed_business_ids = {b.id for b in user.businesses}
 
-    # ✅ FILTER by business_id
-    query = db.query(Document).filter(Document.business_id == business_id)
+    requested_ids = [
+        bid for bid in body.business_ids
+        if bid in allowed_business_ids
+    ]
+
+    if not requested_ids:
+        return {"error": "No valid businesses selected"}
+
+    query = db.query(Document).filter(
+        Document.business_id.in_(requested_ids)
+    )
 
     total_docs = query.count()
-    total_pages = ceil(total_docs / page_size) if total_docs > 0 else 1
+    total_pages = (
+        ceil(total_docs / body.page_size)
+        if total_docs > 0
+        else 1
+    )
 
     documents = (
         query
         .order_by(Document.id.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
+        .offset((body.page - 1) * body.page_size)
+        .limit(body.page_size)
         .all()
     )
 
@@ -124,14 +141,17 @@ def get_documents(
         {
             "id": str(doc.id),
             "name": doc.filename,
-            "type": os.path.splitext(doc.filename)[1].replace(".", "").upper(),
+            "type": os.path.splitext(doc.filename)[1]
+                .replace(".", "")
+                .upper(),
+            "business_id": doc.business_id,
         }
         for doc in documents
     ]
 
     return {
-        "page": page,
-        "page_size": page_size,
+        "page": body.page,
+        "page_size": body.page_size,
         "total_pages": total_pages,
         "total_documents": total_docs,
         "documents": docs_list,

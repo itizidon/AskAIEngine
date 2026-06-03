@@ -1,5 +1,6 @@
 "use client";
 
+import { useBusiness } from "@/app/context/BusinessContext";
 import { useState, useRef, useEffect } from "react";
 
 const ACCEPTED_TYPES = ".pdf,.txt,.md,.docx,.csv,.xlsx,.xls";;
@@ -26,7 +27,11 @@ const badgeColor: Record<string, { bg: string; color: string }> = {
   IMG: { bg: "#22c55e22", color: "#22c55e" }, // image placeholder
 };
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
 export default function DashboardSearchMock() {
+  const { selectedBusiness } = useBusiness();
+  const businessName = selectedBusiness?.name
   const [docs, setDocs] = useState<Doc[]>([]);
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
@@ -37,26 +42,34 @@ export default function DashboardSearchMock() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
-  const [businessName, setBusinessName] = useState("");
   const [sources, setSources] = useState<{ id: number; filename: string }[]>([]);
   console.log(docs)
   // ── Fetch documents with merge to avoid overwriting pending files ──
   useEffect(() => {
     const fetchDocuments = async () => {
       try {
-        const res = await fetch(
-          `http://localhost:8000/documents?page=${page}&page_size=10`,
-          { credentials: "include" }
-        );
+        const res = await fetch(`${API_BASE}/documents`, {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            business_ids: [selectedBusiness?.id],
+            page: 1,
+            page_size: 10,
+          }),
+        });
         const data = await res.json();
-
-        const fetchedDocs: Doc[] = data.documents.map((doc: any) => ({
+        console.log(data,'dataaa')
+        const fetchedDocs: Doc[] = data?.documents?.map((doc: any) => ({
           id: doc.id.toString(), // frontend key
           backendId: doc.id.toString(), // backend ID
           name: doc.name,
           type: doc.type ?? "FILE",
           status: "ready",
-        }));
+        }))|| [];
+
 
         setDocs(prev => {
           const pendingOrProcessing = prev.filter(d => d.status !== "ready");
@@ -69,23 +82,6 @@ export default function DashboardSearchMock() {
 
     fetchDocuments();
   }, [page]);
-
-  useEffect(() => {
-    const fetchBusiness = async () => {
-      try {
-        const res = await fetch("http://localhost:8000/me/business", {
-          credentials: "include",
-        });
-
-        const data = await res.json();
-        setBusinessName(data.name);
-      } catch (err) {
-        console.error("Failed to fetch business name", err);
-      }
-    };
-
-    fetchBusiness();
-  }, []);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
