@@ -1,0 +1,78 @@
+# Virtual environment
+.venv/
+venv/
+ENV/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Byte-compiled / optimized / DLL files
+*.so
+*.dylib
+*.pyd
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Logs and databases
+*.log
+*.sqlite3
+*.db
+
+# Environment variables / secrets
+.env
+.env.*.local
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Mac OS metadata
+.AppleDouble
+.LSOverride
+
+# ── ChromaDB local storage ──
+chromadb/
+.chromadb/
+chroma_db/
+.chroma_db/
+
+# Optional: ignore all .bin files inside these folders
+chromadb/**/*.bin
+chroma_db/**/*.bin
+
+# Python coverage reports
+htmlcov/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+# Pytest cache
+.pytest_cache/
+
+# MyPy cache
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# FastAPI / Uvicorn / Starlette temp files
+*.pid
