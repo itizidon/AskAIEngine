@@ -7,14 +7,14 @@ import { useEffect } from "react";
 export default function BusinessGate({ children }) {
   const { selectedBusiness } = useBusiness();
   const router = useRouter();
-
+  console.log('hit here2')
   useEffect(() => {
     if (!selectedBusiness) {
-      router.push("/select-business");
+      router.push("/businesses");
+    }else{
+      router.push("/search")
     }
   }, [selectedBusiness]);
-
-  if (!selectedBusiness) return null;
 
   return children;
 }

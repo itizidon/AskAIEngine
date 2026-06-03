@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-
+import { useBusiness } from "@/app/context/BusinessContext";
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 type Business = {
@@ -12,7 +12,8 @@ type Business = {
 
 export default function SelectBusinessPage() {
   const router = useRouter();
-
+  const { selectBusiness } = useBusiness();
+  console.log('hit here')
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -45,37 +46,10 @@ export default function SelectBusinessPage() {
     loadBusinesses();
   }, []);
 
-  async function selectBusiness(business: Business) {
+  async function handleBusiness(business: Business) {
     try {
       setSelecting(business.id);
-
-      // 1. Set in frontend context immediately (UI update)
       selectBusiness(business);
-
-      // 2. OPTIONAL: sync with backend (JWT update)
-      const res = await fetch(
-        `${API_BASE}/api/auth/set-business`,
-        {
-          method: "POST",
-          credentials: "include",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            business_id: business.id,
-          }),
-        }
-      );
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(
-          data?.detail || "Failed to set business"
-        );
-      }
-
-      router.push("/search");
     } catch (err: any) {
       alert(err.message || "Failed to select business");
     } finally {
@@ -115,7 +89,7 @@ export default function SelectBusinessPage() {
           {businesses.map((biz) => (
             <button
               key={biz.id}
-              onClick={() => selectBusiness(biz)}
+              onClick={() => handleBusiness(biz)}
               disabled={selecting === biz.id}
               className="w-full rounded-lg border border-zinc-200 bg-white px-4 py-3 text-left text-sm text-zinc-900 transition hover:bg-zinc-50 disabled:opacity-60 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
             >

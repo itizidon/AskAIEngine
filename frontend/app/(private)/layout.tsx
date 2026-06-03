@@ -1,6 +1,6 @@
 import ProtectedLayout from "../lib/protected";
 import Providers from "../providers";
-import BusinessGate from "../(private)/BusinessGate";
+import BusinessGate from "./BusinessGate";
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   return (
