@@ -85,40 +85,50 @@ export default function DashboardSearchMock() {
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
-
+  
     if (!question.trim()) return;
-
+  
+    if (!selectedBusiness) {
+      alert("Please select a business first");
+      return;
+    }
+  
     setLoading(true);
     setAnswer("");
-
+  
     const initialOffset = 0;
-    setOffset(0); // 🔥 reset pagination
-
+    setOffset(0);
+  
     try {
-      const res = await fetch("http://localhost:8000/ask", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "include",
-        body: JSON.stringify({
-          question,
-          get_k: 3,
-          offset: initialOffset,
-        }),
-      });
-
+      const res = await fetch(
+        "http://localhost:8000/ask",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          credentials: "include",
+          body: JSON.stringify({
+            question,
+            business_id: selectedBusiness.id,
+            get_k: 3,
+            offset: initialOffset,
+          }),
+        }
+      );
+  
       const data = await res.json();
-      console.log(data,"data")
-
+  
+      console.log(data);
+  
       setAnswer(data.answer);
       setSources(data.sources || []);
-
       setHasMore(data.hasMore ?? false);
-
     } catch (err) {
       console.error(err);
-      setAnswer("Something went wrong while searching.");
+      setAnswer(
+        "Something went wrong while searching."
+      );
     } finally {
       setLoading(false);
     }
@@ -181,6 +191,7 @@ export default function DashboardSearchMock() {
         const tempId = crypto.randomUUID(); // unique frontend ID
         const isImage = file.type.startsWith("image/");
         formData.append("files", file);
+        formData.append("business_id", selectedBusiness.id.toString());
         return {
           id: tempId,
           name: file.name,

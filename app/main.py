@@ -1,5 +1,5 @@
 import uvicorn
-from fastapi import FastAPI, UploadFile, File, Depends, Query
+from fastapi import FastAPI, UploadFile, File, Depends, Query, HTTPException, Form
 from typing import List
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import get_db
@@ -25,6 +25,7 @@ class AskRequest(BaseModel):
     question: str
     get_k: int
     offset: int
+    business_id: int
 
 app = FastAPI()
 app.add_middleware(
@@ -47,12 +48,16 @@ def read_item(item_id: int, q: str | None = None):
 
 @app.post("/upload-multiple")
 async def upload_documents(
+    business_id: int = Form(...),
     current_context: User = Depends(get_current_user),
     files: List[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ):
-    print('look here')
-    user, business_id = current_context
+    print("🔥 UPLOAD HIT")
+    print("BUSINESS ID:", business_id)
+    print("FILES:", [f.filename for f in files])
+    print('look here', business_id)
+    user = current_context
     business = db.query(Business).filter(Business.id == business_id).first()
     if not business:
         return {"error": "Business not found"}
@@ -72,9 +77,13 @@ async def upload_documents(
             content="",  # optional; can store raw text or leave blank
             status="ready",
         )
+
+        print("📄 DOC CREATED:", doc.id, "BUSINESS:", doc.business_id)
         db.add(doc)
         db.commit()
         db.refresh(doc)
+
+        print("🚀 CALLING INGEST:", business.id, doc.id)
 
         chunks_count = ingest_document(
             db          = db,
@@ -175,19 +184,29 @@ def get_my_businesses(
 def ask_question(
     body: AskRequest,
     db: Session = Depends(get_db),
-    current_context = Depends(get_current_user),
+    current_context=Depends(get_current_user),
 ):
-    user, business_id = current_context
-    print("CURRENT CONTEXT:", current_context)
-    print("BUSINESS ID:", business_id)
+    user, _ = current_context
+
+    # Security check
+    allowed_business_ids = {b.id for b in user.businesses}
+
+    if body.business_id not in allowed_business_ids:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have access to this business",
+        )
+
+    print("USER:", user.id)
+    print("BUSINESS:", body.business_id)
+
     retrieval = retrieve_chunks(
         db=db,
-        business_id=business_id,
+        business_id=body.business_id,
         query=body.question,
         get_k=body.get_k,
         offset=body.offset,
     )
-    print(retrieval)
 
     chunks = retrieval["results"]
 
@@ -199,17 +218,26 @@ def ask_question(
             "nextOffset": retrieval["nextOffset"],
         }
 
-    answer = generate_answer(body.question, chunks)
-    db.add(QueryLog(
-        business_id=business_id,
-        query_text=body.question,
-        answer=answer
-    ))
+    answer = generate_answer(
+        body.question,
+        chunks,
+    )
+
+    db.add(
+        QueryLog(
+            business_id=body.business_id,
+            query_text=body.question,
+            answer=answer,
+        )
+    )
+
     db.commit()
 
     return {
         "answer": answer,
-        "sources": list({c["filename"] for c in chunks}),
+        "sources": list(
+            {c["filename"] for c in chunks}
+        ),
         "chunks_used": len(chunks),
         "hasMore": retrieval["hasMore"],
         "nextOffset": retrieval["nextOffset"],

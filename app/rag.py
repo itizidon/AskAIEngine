@@ -113,6 +113,7 @@ def ingest_document(
     import pandas as pd
     from pathlib import Path
 
+    print("🧠 INGEST START:", business_id, document_id)
     ext = Path(file_path).suffix.lower()
     embedder = get_embedder()
     chunks = []

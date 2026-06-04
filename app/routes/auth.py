@@ -113,14 +113,13 @@ def logout(response: Response):
 
 @router.get("/me", response_model=UserResponse)
 def me(current_context = Depends(get_current_user)):
-    user, business_id = current_context
+    user = current_context
 
     user_dict = {
         "id": user.id,
         "name": user.name,
         "email": user.email,
         "role": user.role,
-        "business_id": business_id,
     }
 
     return UserResponse.model_validate(user_dict)
