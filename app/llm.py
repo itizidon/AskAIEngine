@@ -20,7 +20,11 @@ def build_prompt(question: str, chunks: List[dict]) -> str:
 
     for i, chunk in enumerate(chunks, 1):
         context_blocks.append(
-            f"[{i}] FILE: {chunk['filename']}\n{chunk['text']}"
+            f"""[{i}]
+          FILE: {chunk['filename']}
+          SCORE: {chunk['score']}
+          {chunk['text']}
+          """
         )
 
     context = "\n\n---\n\n".join(context_blocks)
@@ -63,6 +67,7 @@ Requirements:
 - NEVER combine numeric facts.
 - Each unique value must be its own fact.
 - Do not summarize multiple charges into one sentence.
+- A single fact may contain at most ONE numeric value.
 
 CONTEXT:
 {context}

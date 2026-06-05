@@ -113,7 +113,6 @@ def ingest_document(
     import pandas as pd
     from pathlib import Path
 
-    print("🧠 INGEST START:", business_id, document_id)
     ext = Path(file_path).suffix.lower()
     embedder = get_embedder()
     chunks = []
@@ -182,8 +181,6 @@ def retrieve_chunks(
         normalize_embeddings=True
     ).tolist()[0]
 
-    print(query_vector,'query_vector')
-
     params = {
         "query_vec": query_vector,
         "business_id": business_id,
@@ -210,6 +207,7 @@ def retrieve_chunks(
         JOIN documents d ON d.id = c.document_id
 
         WHERE c.business_id = :business_id
+        AND (1 - (c.embedding <=> CAST(:query_vec AS vector))) >= 0.55
         {doc_filter_sql}
 
         ORDER BY c.embedding <=> CAST(:query_vec AS vector)
@@ -222,15 +220,6 @@ def retrieve_chunks(
         text(sql),
         params
     ).fetchall()
-
-    print("OFFSET:", offset)
-    print("RAW ROW COUNT:", len(results))
-    print("GET_K:", get_k)
-    print("HAS_MORE:", len(results) > get_k)
-
-    print("\n========== RETRIEVAL DEBUG ==========")
-    print("QUERY:", query)
-    print("RESULT COUNT:", len(results))
 
     for r in results[:5]:
         print("\n---")
