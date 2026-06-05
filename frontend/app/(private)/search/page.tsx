@@ -61,14 +61,14 @@ export default function DashboardSearchMock() {
           }),
         });
         const data = await res.json();
-        console.log(data,'dataaa')
+        console.log(data, 'dataaa')
         const fetchedDocs: Doc[] = data?.documents?.map((doc: any) => ({
           id: doc.id.toString(), // frontend key
           backendId: doc.id.toString(), // backend ID
           name: doc.name,
           type: doc.type ?? "FILE",
           status: "ready",
-        }))|| [];
+        })) || [];
 
 
         setDocs(prev => {
@@ -85,20 +85,20 @@ export default function DashboardSearchMock() {
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
-  
+
     if (!question.trim()) return;
-  
+
     if (!selectedBusiness) {
       alert("Please select a business first");
       return;
     }
-  
+
     setLoading(true);
     setAnswer("");
-  
+
     const initialOffset = 0;
     setOffset(0);
-  
+
     try {
       const res = await fetch(
         "http://localhost:8000/ask",
@@ -116,11 +116,11 @@ export default function DashboardSearchMock() {
           }),
         }
       );
-  
+
       const data = await res.json();
-  
-      console.log(data);
-  
+
+      console.log(data,'this is data');
+
       setAnswer(data.answer);
       setSources(data.sources || []);
       setHasMore(data.hasMore ?? false);
@@ -160,7 +160,7 @@ export default function DashboardSearchMock() {
       }
 
       const data = await res.json();
-      console.log(answer,'this is answer')
+      console.log(answer, 'this is answer')
       setAnswer(data.answer);
       setSources(data.sources || []);
 
@@ -352,44 +352,61 @@ export default function DashboardSearchMock() {
           )}
 
           {/* Answer Card */}
-          {answer && !loading && (
-            <div className="mt-8 w-full max-w-2xl">
+          {answer?.answers?.length > 0 && (
+            <div className="mt-8 w-full max-w-3xl space-y-4">
+              {answer.answers.map(
+                (item: any, index: number) => (
+                  <div
+                    key={index}
+                    className="
+            rounded-2xl
+            border
+            border-zinc-800
+            bg-zinc-900
+            p-5
+            shadow-lg
+          "
+                  >
+                    <div className="text-white leading-relaxed">
+                      {item.fact}
+                    </div>
 
-              <div className="relative rounded-3xl bg-gray-900 border border-gray-800 shadow-2xl overflow-hidden">
+                    <div className="mt-4">
+                      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                        Sources
+                      </div>
 
-                {/* Glow Accent */}
-                <div className="absolute inset-0 bg-gradient-to-br from-blue-600/10 via-transparent to-purple-600/10 pointer-events-none" />
+                      <div className="space-y-2">
+                        {item.sources.map(
+                          (source: any, sourceIndex: number) => (
+                            <div
+                              key={sourceIndex}
+                              className="
+                      flex
+                      items-center
+                      justify-between
+                      rounded-lg
+                      bg-zinc-800
+                      px-3
+                      py-2
+                      text-sm
+                    "
+                            >
+                              <span className="text-zinc-200">
+                                {source.filename}
+                              </span>
 
-                {/* Inner Content */}
-                <div className="relative p-6">
-
-
-                  {/* Answer Content */}
-                  <div className="space-y-3 text-gray-200 text-[15px] leading-relaxed max-h-64 overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-zinc-700 scrollbar-track-transparent">
-                    {answer.split("\n").map((line, i) => {
-                      if (line.includes(":")) {
-                        const [title, ...rest] = line.split(":");
-                        return (
-                          <p key={i}>
-                            <span className="font-semibold text-white">{title}:</span>
-                            {rest.join(":")}
-                          </p>
-                        );
-                      }
-                      return <p key={i}>{line}</p>;
-                    })}
-
+                              <span className="rounded bg-blue-600 px-2 py-1 text-xs text-white">
+                                {source.chunk}
+                              </span>
+                            </div>
+                          )
+                        )}
+                      </div>
+                    </div>
                   </div>
-                  {hasMore && !loading && (
-                    <button
-                      onClick={handleLoadMore}
-                      className="mt-4 rounded-xl bg-zinc-800 border border-zinc-700 px-4 py-2 text-sm text-white hover:bg-zinc-700 transition"
-                    >
-                      Load More
-                    </button>
-                  )}
-                </div>
-              </div>
+                )
+              )}
             </div>
           )}
           <p style={s.supportedTypes}>

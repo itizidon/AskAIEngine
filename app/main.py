@@ -231,6 +231,8 @@ def ask_question(
         )
     )
 
+    print(answer,'answer')
+
     db.commit()
 
     return {

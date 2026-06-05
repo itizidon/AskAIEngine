@@ -3,6 +3,7 @@ from sqlalchemy import Column, Integer, String, ForeignKey, Table, Text, DateTim
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from pgvector.sqlalchemy import Vector
+from sqlalchemy.dialects.postgresql import JSONB
 
 # Junction table
 user_business = Table(
@@ -64,7 +65,7 @@ class QueryLog(Base):
     id = Column(Integer, primary_key=True, index=True)
     business_id = Column(Integer, ForeignKey("businesses.id"), nullable=False, index=True)
     query_text = Column(Text, nullable=False)
-    answer = Column(Text, nullable=False)
+    answer = Column(JSONB, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     business = relationship("Business", back_populates="query_logs")

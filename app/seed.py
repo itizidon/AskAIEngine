@@ -12,61 +12,36 @@ engine       = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 
 
-def run_migrations(conn):
-    """Apply any schema changes that create_all won't handle automatically."""
+def reset_schema():
+    """Drop all tables and extensions, then recreate from scratch."""
+    print("  Dropping all tables...")
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS query_logs    CASCADE;"))
+        conn.execute(text("DROP TABLE IF EXISTS chunks        CASCADE;"))
+        conn.execute(text("DROP TABLE IF EXISTS documents     CASCADE;"))
+        conn.execute(text("DROP TABLE IF EXISTS user_business CASCADE;"))
+        conn.execute(text("DROP TABLE IF EXISTS users         CASCADE;"))
+        conn.execute(text("DROP TABLE IF EXISTS businesses    CASCADE;"))
+    print("  All tables dropped.")
 
-    # Enable pgvector extension
-    conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
-
-    # hashed_password column
-    conn.execute(text("""
-        ALTER TABLE users
-        ADD COLUMN IF NOT EXISTS hashed_password VARCHAR NOT NULL DEFAULT '';
-    """))
-    conn.execute(text("""
-        ALTER TABLE users
-        ALTER COLUMN hashed_password DROP DEFAULT;
-    """))
-
-    # Make documents.content nullable (was NOT NULL before)
-    conn.execute(text("""
-        ALTER TABLE documents
-        ALTER COLUMN content DROP NOT NULL;
-    """))
-
-    # Drop chunks table if embedding column is wrong type (Text instead of vector)
-    # This recreates it with the correct Vector(384) type via create_all below
-    conn.execute(text("""
-        DO $$
-        BEGIN
-            IF EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'chunks'
-                AND column_name = 'embedding'
-                AND data_type = 'text'
-            ) THEN
-                DROP TABLE chunks CASCADE;
-                RAISE NOTICE 'Dropped chunks table (wrong embedding type)';
-            END IF;
-        END $$;
-    """))
-
-    conn.commit()
-    print("  Migrations applied.")
+    print("  Enabling pgvector extension...")
+    with engine.begin() as conn:
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+    print("  pgvector ready.")
 
 
 def seed():
-    # Step 1 — run migrations first
-    with engine.connect() as conn:
-        run_migrations(conn)
+    # ── Step 1: Wipe and recreate schema ────────────────────────────────────────
+    reset_schema()
 
-    # Step 2 — create all tables (including new ones like chat_sessions, chat_messages)
+    print("  Creating tables from models...")
     Base.metadata.create_all(bind=engine)
-    print("  Tables created/verified.")
+    print("  Tables created.")
 
+    # ── Step 2: Seed data ────────────────────────────────────────────────────────
     db = SessionLocal()
     try:
-        # ── Businesses ──────────────────────────────────────────────────────────
+        # ── Businesses ───────────────────────────────────────────────────────────
         business_names = [
             "Acme Inc",
             "Globex Corp",
@@ -76,85 +51,54 @@ def seed():
         ]
         businesses = []
         for name in business_names:
-            business = db.query(Business).filter(Business.name == name).first()
-            if not business:
-                business = Business(name=name)
-                db.add(business)
-                db.flush()
-                print(f"  Created business: {name}")
-            else:
-                print(f"  Business '{name}' already exists, skipping.")
+            business = Business(name=name)
+            db.add(business)
             businesses.append(business)
+        db.flush()
+        print(f"  Created {len(businesses)} businesses.")
 
-        # ── Super admin ─────────────────────────────────────────────────────────
-        super_admin_email = "admin@example.com"
-        super_admin = db.query(User).filter(User.email == super_admin_email).first()
-        if not super_admin:
-            super_admin = User(
-                email           = super_admin_email,
-                name            = "Super Admin",
-                hashed_password = hash_password("supersecret123"),
-                role            = "admin",
-            )
-            db.add(super_admin)
-            db.flush()
-            print("  Created super admin: admin@example.com")
-        else:
-            super_admin.hashed_password = hash_password("supersecret123")
-            super_admin.role            = "admin"
-            print("  Super admin already exists, password reset.")
+        # ── Super admin ──────────────────────────────────────────────────────────
+        super_admin = User(
+            email           = "admin@example.com",
+            name            = "Super Admin",
+            hashed_password = hash_password("supersecret123"),
+            role            = "admin",
+        )
+        db.add(super_admin)
+        db.flush()
+        print("  Created super admin: admin@example.com")
 
-        # ── Business owner ──────────────────────────────────────────────────────
-        owner_email = "owner@example.com"
-        owner = db.query(User).filter(User.email == owner_email).first()
-        if not owner:
-            owner = User(
-                email           = owner_email,
-                name            = "Business Owner",
-                hashed_password = hash_password("ownerpass123"),
-                role            = "user",
-            )
-            db.add(owner)
-            db.flush()
-            print("  Created business owner: owner@example.com")
-        else:
-            owner.hashed_password = hash_password("ownerpass123")
-            print("  Business owner already exists, password reset.")
+        # ── Business owner ───────────────────────────────────────────────────────
+        owner = User(
+            email           = "owner@example.com",
+            name            = "Business Owner",
+            hashed_password = hash_password("ownerpass123"),
+            role            = "user",
+        )
+        db.add(owner)
+        db.flush()
+        owner.businesses.append(businesses[0])  # Linked to Acme Inc
+        print(f"  Created business owner: owner@example.com → linked to {businesses[0].name}")
 
-        # Link owner to first business
-        if businesses and businesses[0] not in owner.businesses:
-            owner.businesses.append(businesses[0])
-            print(f"  Linked owner to: {businesses[0].name}")
-
-        # ── Test user ───────────────────────────────────────────────────────────
-        test_email = "test@example.com"
-        test_user = db.query(User).filter(User.email == test_email).first()
-        if not test_user:
-            test_user = User(
-                email           = test_email,
-                name            = "Test User",
-                hashed_password = hash_password("testpass123"),
-                role            = "user",
-            )
-            db.add(test_user)
-            db.flush()
-            print("  Created test user: test@example.com")
-        else:
-            test_user.hashed_password = hash_password("testpass123")
-            print("  Test user already exists, password reset.")
-
-        # Link test user to second business if available
-        if len(businesses) > 1 and businesses[1] not in test_user.businesses:
-            test_user.businesses.append(businesses[1])
-            print(f"  Linked test user to: {businesses[1].name}")
+        # ── Test user ────────────────────────────────────────────────────────────
+        test_user = User(
+            email           = "test@example.com",
+            name            = "Test User",
+            hashed_password = hash_password("testpass123"),
+            role            = "user",
+        )
+        db.add(test_user)
+        db.flush()
+        test_user.businesses.append(businesses[1])  # Linked to Globex Corp
+        print(f"  Created test user: test@example.com → linked to {businesses[1].name}")
 
         db.commit()
 
         print("\nSeed complete.")
         print("\nTest credentials:")
-        print("  Super Admin   → admin@example.com  / supersecret123")
-        print("  Business Owner→ owner@example.com  / ownerpass123")
-        print("  Test User     → test@example.com   / testpass123")
+        print("  Super Admin    → admin@example.com / supersecret123")
+        print("  Business Owner → owner@example.com / ownerpass123")
+        print("  Test User      → test@example.com  / testpass123")
 
     except Exception as e:
         db.rollback()

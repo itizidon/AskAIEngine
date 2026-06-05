@@ -4,6 +4,7 @@ Builds grounded prompts from retrieved chunks and generates answers.
 """
 
 import os
+import json
 from typing import List
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -75,6 +76,7 @@ QUESTION:
 def call_openai(prompt: str) -> str:
     response = client.chat.completions.create(
         model="gpt-4o-mini",  # cheap + fast + strong for RAG
+        response_format={"type": "json_object"},
         messages=[
             {"role": "user", "content": prompt}
         ],
@@ -85,7 +87,19 @@ def call_openai(prompt: str) -> str:
 
 
 # ── Public interface ───────────────────────────────────────────────────────────
-def generate_answer(question: str, chunks: List[dict]) -> str:
-    print(question)
+def generate_answer(question: str, chunks: List[dict]) -> dict:
     prompt = build_prompt(question, chunks)
-    return call_openai(prompt)
+    raw = call_openai(prompt)
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # fallback safety
+        return {
+            "answers": [
+                {
+                    "fact": raw,
+                    "sources": []
+                }
+            ]
+        }
