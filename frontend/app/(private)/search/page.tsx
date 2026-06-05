@@ -119,9 +119,9 @@ export default function DashboardSearchMock() {
 
       const data = await res.json();
 
-      console.log(data,'this is data');
+      console.log(data, 'this is data');
 
-      setAnswer(data.answer);
+      setAnswer(data.answer.answers);
       setSources(data.sources || []);
       setHasMore(data.hasMore ?? false);
     } catch (err) {
@@ -152,6 +152,7 @@ export default function DashboardSearchMock() {
           question,
           get_k: 3,
           offset: nextOffset,
+          business_id: selectedBusiness?.id,
         }),
       });
 
@@ -160,8 +161,9 @@ export default function DashboardSearchMock() {
       }
 
       const data = await res.json();
-      console.log(answer, 'this is answer')
-      setAnswer(data.answer);
+      console.log(data, 'this is answer')
+      console.log(answer, "answer")
+      setAnswer([...answer, ...data?.answer?.answers]);
       setSources(data.sources || []);
 
       // 🔥 update offset AFTER success
@@ -352,13 +354,25 @@ export default function DashboardSearchMock() {
           )}
 
           {/* Answer Card */}
-          {answer?.answers?.length > 0 && (
-            <div className="mt-8 w-full max-w-3xl space-y-4">
-              {answer.answers.map(
-                (item: any, index: number) => (
-                  <div
-                    key={index}
-                    className="
+          {answer?.length > 0 && (
+            <>
+              <div
+                className="
+    mt-8
+    w-full
+    max-w-4xl
+    flex-1
+    min-h-0
+    overflow-y-auto
+    space-y-4
+    pr-2
+  "
+              >
+                {answer.map(
+                  (item: any, index: number) => (
+                    <div
+                      key={index}
+                      className="
             rounded-2xl
             border
             border-zinc-800
@@ -366,22 +380,22 @@ export default function DashboardSearchMock() {
             p-5
             shadow-lg
           "
-                  >
-                    <div className="text-white leading-relaxed">
-                      {item.fact}
-                    </div>
-
-                    <div className="mt-4">
-                      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
-                        Sources
+                    >
+                      <div className="text-white leading-relaxed">
+                        {item.fact}
                       </div>
 
-                      <div className="space-y-2">
-                        {item.sources.map(
-                          (source: any, sourceIndex: number) => (
-                            <div
-                              key={sourceIndex}
-                              className="
+                      <div className="mt-4">
+                        <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                          Sources
+                        </div>
+
+                        <div className="space-y-2">
+                          {item.sources.map(
+                            (source: any, sourceIndex: number) => (
+                              <div
+                                key={sourceIndex}
+                                className="
                       flex
                       items-center
                       justify-between
@@ -391,23 +405,44 @@ export default function DashboardSearchMock() {
                       py-2
                       text-sm
                     "
-                            >
-                              <span className="text-zinc-200">
-                                {source.filename}
-                              </span>
+                              >
+                                <span className="text-zinc-200">
+                                  {source.filename}
+                                </span>
 
-                              <span className="rounded bg-blue-600 px-2 py-1 text-xs text-white">
-                                {source.chunk}
-                              </span>
-                            </div>
-                          )
-                        )}
+                                <span className="rounded bg-blue-600 px-2 py-1 text-xs text-white">
+                                  {source.chunk}
+                                </span>
+                              </div>
+                            )
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )
+                  )
+                )}
+              </div>
+              {hasMore && (
+                <div className="mt-4 flex justify-center">
+                  <button
+                    onClick={handleLoadMore}
+                    disabled={loading}
+                    className="
+              rounded-xl
+              bg-blue-600
+              px-5
+              py-2
+              text-white
+              font-medium
+              hover:bg-blue-700
+              disabled:opacity-50
+            "
+                  >
+                    {loading ? "Loading..." : "Load More"}
+                  </button>
+                </div>
               )}
-            </div>
+            </>
           )}
           <p style={s.supportedTypes}>
             Supported: PDF, DOCX, TXT, MD, CSV, XLSX, XLS — max 10MB

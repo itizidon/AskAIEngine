@@ -223,6 +223,11 @@ def retrieve_chunks(
         params
     ).fetchall()
 
+    print("OFFSET:", offset)
+    print("RAW ROW COUNT:", len(results))
+    print("GET_K:", get_k)
+    print("HAS_MORE:", len(results) > get_k)
+
     print("\n========== RETRIEVAL DEBUG ==========")
     print("QUERY:", query)
     print("RESULT COUNT:", len(results))
