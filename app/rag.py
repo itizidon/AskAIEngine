@@ -21,6 +21,12 @@ CHUNK_OVERLAP = 100
 TOP_K         = 5
 EMBED_MODEL   = "all-MiniLM-L6-v2"
 
+# Minimum similarity score for standard (non-tabular) document chunks.
+# Tabular chunks use a lower threshold because their header-heavy format
+# embeds differently from natural-language queries.
+MIN_SCORE_STANDARD = 0.45
+MIN_SCORE_TABULAR  = 0.25
+
 # ── Singleton embedder ─────────────────────────────────────────────────────────
 _embedder = None
 
@@ -37,37 +43,30 @@ def extract_text(file_path: str, mime_type: str) -> str:
     path = Path(file_path)
     ext = path.suffix.lower()
 
-    # --- 1. Handle PDF (Existing) ---
     if ext == ".pdf":
         import fitz
         text = ""
         doc = fitz.open(path)
         for page in doc:
-            # Using blocks helps maintain table structure better than raw text
             blocks = page.get_text("blocks")
             for b in blocks:
                 text += b[4] + " "
         doc.close()
         return text
 
-    # --- 2. Handle Excel (.xlsx, .xls) ---
     if ext in [".xlsx", ".xls"]:
         import pandas as pd
-        # Read all sheets
         dict_df = pd.read_excel(path, sheet_name=None)
         text_output = []
         for sheet_name, df in dict_df.items():
             text_output.append(f"Sheet: {sheet_name}\n{df.to_csv(index=False)}")
         return "\n\n".join(text_output)
 
-    # --- 3. Handle CSV ---
     if ext == ".csv":
         import pandas as pd
         df = pd.read_csv(path)
-        # CSVs are best represented as comma-separated text for the model to parse
         return df.to_csv(index=False)
 
-    # --- 4. Handle Word & Text (Existing) ---
     if ext == ".docx":
         import docx
         doc = docx.Document(path)
@@ -83,22 +82,16 @@ def extract_text(file_path: str, mime_type: str) -> str:
 
 # ── Chunking ───────────────────────────────────────────────────────────────────
 def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
-    # This splitter tries to stay within chunk_size by splitting at:
-    # 1. Paragraphs ("\n\n")
-    # 2. Newlines ("\n")
-    # 3. Spaces (" ")
-    # 4. Characters (last resort)
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=overlap,
         separators=["\n\n", "\n", " ", ""]
     )
-    
-    # split_text returns a list of strings
     return splitter.split_text(text)
 
 def clean_text(text: str) -> str:
     return text.replace("\x00", "")
+
 
 # ── Ingest ─────────────────────────────────────────────────────────────────────
 def ingest_document(
@@ -116,20 +109,71 @@ def ingest_document(
     ext = Path(file_path).suffix.lower()
     embedder = get_embedder()
     chunks = []
+    is_tabular = False
 
     # ── BRANCH 1: Tabular Data (CSV/Excel) ──
     if ext in [".csv", ".xlsx", ".xls"]:
+        is_tabular = True
         try:
             if ext == ".csv":
                 df = pd.read_csv(file_path)
             else:
                 df = pd.read_excel(file_path)
 
-            # Convert every row into a descriptive string
-            # Example: "Drug: Amoxicillin, Dosage: 500mg, Stock: 50"
-            for _, row in df.iterrows():
-                row_str = ", ".join([f"{col}: {val}" for col, val in row.items() if pd.notna(val)])
-                chunks.append(row_str)
+            df.columns = [str(c).strip() for c in df.columns]
+            col_list   = ", ".join(df.columns.tolist())
+            num_rows   = len(df)
+            table_name = Path(filename).stem.replace("_", " ").replace("-", " ").title()
+
+            # ── Chunk 1: Schema header ───────────────────────────────────────
+            # Always the first chunk — orients the LLM to the full table structure.
+            # Also includes sample values per column so the embedder can match
+            # queries like "dr. sue" or "office visit" to the right columns.
+            sample_lines = []
+            for col in df.columns:
+                samples = (
+                    df[col]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .loc[lambda s: s != ""]
+                    .unique()[:3]
+                    .tolist()
+                )
+                sample_lines.append(f"  - {col}: e.g. {', '.join(samples)}" if samples else f"  - {col}")
+
+            schema_chunk = (
+                f"[Table: {table_name}]\n"
+                f"This table has {num_rows} rows and {len(df.columns)} columns.\n"
+                f"Columns and sample values:\n" + "\n".join(sample_lines) + "\n"
+                f"Source file: {filename}"
+            )
+            chunks.append(schema_chunk)
+
+            # ── Chunks 2+: Row windows ───────────────────────────────────────
+            WINDOW_SIZE = 10
+            OVERLAP     = 2
+            step        = WINDOW_SIZE - OVERLAP
+
+            for start in range(0, num_rows, step):
+                end    = min(start + WINDOW_SIZE, num_rows)
+                window = df.iloc[start:end]
+
+                lines = [
+                    f"[Table: {table_name} | Columns: {col_list} | "
+                    f"Rows {start + 1}–{end} of {num_rows}]"
+                ]
+
+                for row_idx, (_, row) in enumerate(window.iterrows(), start=start + 1):
+                    pairs = [
+                        f"{col}: {val}"
+                        for col, val in row.items()
+                        if pd.notna(val) and str(val).strip() != ""
+                    ]
+                    lines.append(f"  Row {row_idx}: " + " | ".join(pairs))
+
+                chunks.append("\n".join(lines))
+
         except Exception as e:
             print(f"Tabular extraction failed: {e}")
             return 0
@@ -146,9 +190,10 @@ def ingest_document(
         return 0
 
     # ── EMBED AND STORE ──
-    # This part remains the same for both types
-    embeddings = embedder.encode(chunks, show_progress_bar=False, normalize_embeddings=True).tolist()
-    
+    embeddings = embedder.encode(
+        chunks, show_progress_bar=False, normalize_embeddings=True
+    ).tolist()
+
     rows = []
     for i, (chunk_text_item, embedding) in enumerate(zip(chunks, embeddings)):
         rows.append(Chunk(
@@ -157,35 +202,37 @@ def ingest_document(
             chunk_index=i,
             text=chunk_text_item,
             embedding=embedding,
+            # chunk_index=0 is always the schema header for tabular files;
+            # callers can use this to always pull it alongside row chunks.
         ))
 
     db.add_all(rows)
     db.commit()
     return len(chunks)
 
+
 # ── Retrieval ──────────────────────────────────────────────────────────────────
 def retrieve_chunks(
     db: Session,
     business_id: int,
     query: str,
-    get_k: int = 3,
+    get_k: int = TOP_K,
     offset: int = 0,
     document_ids: List[int] | None = None,
 ) -> dict:
 
     embedder = get_embedder()
-
-    # Generate normalized query embedding
     query_vector = embedder.encode(
-        [query],
-        normalize_embeddings=True
+        [query], normalize_embeddings=True
     ).tolist()[0]
 
     params = {
-        "query_vec": query_vector,
-        "business_id": business_id,
-        "limit_plus_one": get_k + 1,
-        "offset": offset,
+        "query_vec":       query_vector,
+        "business_id":     business_id,
+        "min_standard":    MIN_SCORE_STANDARD,
+        "min_tabular":     MIN_SCORE_TABULAR,
+        "limit_plus_one":  get_k + 1,
+        "offset":          offset,
     }
 
     doc_filter_sql = ""
@@ -193,58 +240,97 @@ def retrieve_chunks(
         doc_filter_sql = "AND c.document_id = ANY(:doc_ids)"
         params["doc_ids"] = document_ids
 
+    # is_tabular: chunk_index=0 marks the schema header; any document that has
+    # a schema header is a tabular file. We use the per-document presence of
+    # chunk_index=0 with '[Table:' prefix to apply the lower threshold.
     sql = f"""
-        SELECT
-            c.id,
-            c.text,
-            c.document_id,
-            d.filename,
+        WITH scored AS (
+            SELECT
+                c.id,
+                c.text,
+                c.chunk_index,
+                c.document_id,
+                d.filename,
+                1 - (c.embedding <=> CAST(:query_vec AS vector)) AS score,
+                -- flag tabular chunks by their '[Table:' header prefix
+                (c.text LIKE '[Table:%%') AS is_tabular
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE c.business_id = :business_id
+            {doc_filter_sql}
+        ),
+        -- For every tabular document that has at least one chunk scoring above
+        -- the tabular threshold, also pull its schema header (chunk_index=0)
+        -- so the LLM always knows the column layout.
+        tabular_headers AS (
+            SELECT DISTINCT ON (c.document_id)
+                c.id,
+                c.text,
+                c.chunk_index,
+                c.document_id,
+                d.filename,
+                1.0 AS score,   -- give headers a guaranteed high score
+                TRUE  AS is_tabular
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE c.business_id = :business_id
+              AND c.chunk_index = 0
+              AND c.text LIKE '[Table:%%'
+              {doc_filter_sql}
+              AND c.document_id IN (
+                  SELECT document_id FROM scored
+                  WHERE is_tabular
+                    AND score >= :min_tabular
+              )
+        )
+        SELECT id, text, chunk_index, document_id, filename, score
+        FROM (
+            -- Row chunks that pass their respective threshold
+            SELECT id, text, chunk_index, document_id, filename, score
+            FROM scored
+            WHERE (is_tabular  AND score >= :min_tabular)
+               OR (NOT is_tabular AND score >= :min_standard)
 
-            -- cosine similarity
-            1 - (c.embedding <=> CAST(:query_vec AS vector)) AS score
+            UNION
 
-        FROM chunks c
-        JOIN documents d ON d.id = c.document_id
-
-        WHERE c.business_id = :business_id
-        AND (1 - (c.embedding <=> CAST(:query_vec AS vector))) >= 0.55
-        {doc_filter_sql}
-
-        ORDER BY c.embedding <=> CAST(:query_vec AS vector)
-
+            -- Schema headers for matched tabular documents
+            SELECT id, text, chunk_index, document_id, filename, score
+            FROM tabular_headers
+        ) combined
+        ORDER BY score DESC
         LIMIT :limit_plus_one
         OFFSET :offset
     """
 
-    results = db.execute(
-        text(sql),
-        params
-    ).fetchall()
+    results = db.execute(text(sql), params).fetchall()
 
-    for r in results[:5]:
+    # Debug output
+    for r in results[:8]:
         print("\n---")
         print("score:", r.score)
         print("filename:", r.filename)
+        print("chunk_index:", r.chunk_index)
         print("text:", r.text[:200])
 
     has_more = len(results) > get_k
-    results = results[:get_k]
+    results  = results[:get_k]
 
     formatted_results = [
         {
-            "text": row.text,
-            "filename": row.filename,
+            "text":        row.text,
+            "filename":    row.filename,
             "document_id": row.document_id,
-            "score": float(round(row.score, 4)),
+            "score":       float(round(row.score, 4)),
         }
         for row in results
     ]
 
     return {
-        "results": formatted_results,
-        "hasMore": has_more,
-        "nextOffset": offset + get_k if has_more else None
+        "results":    formatted_results,
+        "hasMore":    has_more,
+        "nextOffset": offset + get_k if has_more else None,
     }
+
 
 # ── Delete ─────────────────────────────────────────────────────────────────────
 def delete_document_chunks(db: Session, document_id: int) -> None:
