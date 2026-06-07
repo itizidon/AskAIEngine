@@ -6,7 +6,7 @@ from app.database import get_db
 from sqlalchemy.orm import Session
 from app.routes.auth import router as auth_router
 from app.models import Business, User, Document, QueryLog
-from app.rag import ingest_document, retrieve_chunks
+from app.rag import ingest_document, retrieve_chunks_multi
 from app.llm import generate_answer
 from pydantic import Field, BaseModel
 from app.auth import (
@@ -200,12 +200,13 @@ def ask_question(
     print("USER:", user.id)
     print("BUSINESS:", body.business_id)
 
-    retrieval = retrieve_chunks(
+    # Safe version of the call with defaults
+    retrieval = retrieve_chunks_multi(
         db=db,
         business_id=body.business_id,
         query=body.question,
-        get_k=body.get_k,
-        offset=body.offset,
+        get_k=body.get_k or 5,
+        offset=body.offset or 0,
     )
 
     chunks = retrieval["results"]

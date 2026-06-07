@@ -3,6 +3,7 @@ Core RAG service using pgvector.
 Handles: document ingestion → chunking → embedding → PostgreSQL storage → retrieval
 """
 import os
+import json
 from typing import List
 from pathlib import Path
 from sqlalchemy.orm import Session
@@ -13,17 +14,212 @@ from openai import OpenAI
 from dotenv import load_dotenv
 load_dotenv()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# ── Multi-Query HyDE ───────────────────────────────────────────────────────────
+def generate_query_variants(query: str) -> List[str]:
+    """
+    Ask the LLM to rewrite the query in multiple ways that cover different
+    vocabulary a matching document might use.
+
+    Short vague queries like "standard for personal hygiene" need to expand
+    into domain-specific variants like "SOP personal hygiene garbing procedure"
+    so at least one variant lands close to the actual chunk.
+    """
+    prompt = f"""You are a search query expander for a document retrieval system.
+Given a user question, generate 4 alternative search queries that mean the same thing
+but use different vocabulary, levels of formality, and domain-specific terms.
+
+Rules:
+- Include at least one very specific/technical version
+- Include at least one that uses common abbreviations (SOP, PPE, etc.)
+- Include one that mimics how a document title or heading might be phrased
+- Keep each query under 15 words
+- Return ONLY a JSON array of strings, nothing else
+
+User question: {query}
+"""
+    try:
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4,
+            max_tokens=200,
+        )
+        raw = response.choices[0].message.content.strip()
+        # Strip markdown fences if model adds them
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        variants = json.loads(raw)
+        if isinstance(variants, list):
+            print(f"\n[MultiQuery] Variants: {variants}")
+            return [query] + variants   # always include the original
+    except Exception as e:
+        print(f"[MultiQuery] Failed, using original query only: {e}")
+
+    return [query]
+
+
+def build_multi_hyde_vectors(query: str, embedder: SentenceTransformer) -> List[list]:
+    """
+    For each query variant, generate a HyDE hypothetical and embed it.
+    Returns a list of vectors — one per variant.
+    """
+    import numpy as np
+
+    variants = generate_query_variants(query)
+    vectors  = []
+
+    for variant in variants:
+        try:
+            vec = build_hyde_vector(variant, embedder)
+            vectors.append(vec)
+        except Exception as e:
+            print(f"[MultiQuery] Skipping variant '{variant}': {e}")
+            # Fall back to plain embedding for this variant
+            vec = embedder.encode([variant], normalize_embeddings=True).tolist()[0]
+            vectors.append(vec)
+
+    return vectors
+
+
+def retrieve_chunks_multi(
+    db: Session,
+    business_id: int,
+    query: str,
+    get_k: int,
+    offset: int = 0,
+    document_ids: List[int] | None = None,
+) -> dict:
+    """
+    Multi-query retrieval: run a separate vector search per query variant,
+    then merge results using Reciprocal Rank Fusion (RRF).
+
+    RRF scores each chunk by its rank across all searches rather than its
+    raw similarity score — this prevents one high-scoring irrelevant chunk
+    from drowning out consistently-ranked relevant ones.
+    """
+    embedder = get_embedder()
+    vectors  = build_multi_hyde_vectors(query, embedder)
+
+    doc_filter_sql = ""
+    base_params    = {
+        "business_id":  business_id,
+        "min_standard": MIN_SCORE_STANDARD,
+        "min_tabular":  MIN_SCORE_TABULAR,
+    }
+    if document_ids:
+        doc_filter_sql        = "AND c.document_id = ANY(:doc_ids)"
+        base_params["doc_ids"] = document_ids
+
+    # ── Run one search per vector, collect ranked results ─────────────────────
+    # chunk_id → {text, filename, document_id, rrf_score}
+    rrf_scores: dict = {}
+    RRF_K = 60  # standard RRF constant — dampens the impact of rank differences
+
+    for search_idx, query_vector in enumerate(vectors):
+        params = {
+            **base_params,
+            "query_vec":      query_vector,
+            "limit_plus_one": get_k * 3 + 1,  # cast a wide net per variant
+            "offset":         0,
+        }
+
+        sql = f"""
+            WITH scored AS (
+                SELECT
+                    c.id,
+                    c.text,
+                    c.chunk_index,
+                    c.document_id,
+                    d.filename,
+                    1 - (c.embedding <=> CAST(:query_vec AS vector)) AS score,
+                    (c.text LIKE '[Table:%%') AS is_tabular
+                FROM chunks c
+                JOIN documents d ON d.id = c.document_id
+                WHERE c.business_id = :business_id
+                {doc_filter_sql}
+            ),
+            tabular_headers AS (
+                SELECT DISTINCT ON (c.document_id)
+                    c.id, c.text, c.chunk_index, c.document_id, d.filename,
+                    1.0 AS score, TRUE AS is_tabular
+                FROM chunks c
+                JOIN documents d ON d.id = c.document_id
+                WHERE c.business_id = :business_id
+                  AND c.chunk_index = 0
+                  AND c.text LIKE '[Table:%%'
+                  {doc_filter_sql}
+                  AND c.document_id IN (
+                      SELECT document_id FROM scored
+                      WHERE is_tabular AND score >= :min_tabular
+                  )
+            )
+            SELECT id, text, chunk_index, document_id, filename, score
+            FROM (
+                SELECT id, text, chunk_index, document_id, filename, score
+                FROM scored
+                WHERE (is_tabular     AND score >= :min_tabular)
+                   OR (NOT is_tabular AND score >= :min_standard)
+                UNION
+                SELECT id, text, chunk_index, document_id, filename, score
+                FROM tabular_headers
+            ) combined
+            ORDER BY score DESC
+            LIMIT :limit_plus_one
+            OFFSET :offset
+        """
+
+        rows = db.execute(text(sql), params).fetchall()
+
+        # Apply RRF: score = sum of 1/(rank + RRF_K) across all searches
+        for rank, row in enumerate(rows):
+            chunk_id = row.id
+            rrf_contribution = 1.0 / (rank + 1 + RRF_K)
+
+            if chunk_id not in rrf_scores:
+                rrf_scores[chunk_id] = {
+                    "text":        row.text,
+                    "filename":    row.filename,
+                    "document_id": row.document_id,
+                    "score":       row.score,   # keep best raw score for display
+                    "rrf_score":   0.0,
+                }
+            rrf_scores[chunk_id]["rrf_score"] += rrf_contribution
+
+    # ── Merge and rank by RRF score ───────────────────────────────────────────
+    merged = sorted(rrf_scores.values(), key=lambda x: x["rrf_score"], reverse=True)
+
+    print(f"\n[MultiQuery] {len(vectors)} variants → {len(merged)} unique chunks after RRF")
+    for r in merged[:8]:
+        print(f"  rrf={r['rrf_score']:.4f} score={r['score']:.4f} | {r['filename']} | {r['text'][:100]}")
+
+    has_more = len(merged) > (offset + get_k)
+    page     = merged[offset: offset + get_k]
+
+    return {
+        "results": [
+            {
+                "text":        r["text"],
+                "filename":    r["filename"],
+                "document_id": r["document_id"],
+                "score":       float(round(r["score"], 4)),
+            }
+            for r in page
+        ],
+        "hasMore":    has_more,
+        "nextOffset": offset + get_k if has_more else None,
+    }
+
+# ── Client (works for both OpenAI and Ollama) ──────────────────────────────────
+client = OpenAI(
+    base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"),
+    api_key=os.getenv("OPENAI_API_KEY", "ollama"),
+)
+LLM_MODEL = os.getenv("LLM_MODEL", "mistral:7b")
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-CHUNK_SIZE    = 500
-CHUNK_OVERLAP = 100
-TOP_K         = 5
-EMBED_MODEL   = "all-MiniLM-L6-v2"
-
-# Minimum similarity score for standard (non-tabular) document chunks.
-# Tabular chunks use a lower threshold because their header-heavy format
-# embeds differently from natural-language queries.
+CHUNK_SIZE         = 500
+CHUNK_OVERLAP      = 100
+TOP_K              = 5
+EMBED_MODEL        = "all-MiniLM-L6-v2"
 MIN_SCORE_STANDARD = 0.45
 MIN_SCORE_TABULAR  = 0.25
 
@@ -36,6 +232,68 @@ def get_embedder() -> SentenceTransformer:
         print("Loading embedding model... (first time only)")
         _embedder = SentenceTransformer(EMBED_MODEL)
     return _embedder
+
+
+# ── HyDE ──────────────────────────────────────────────────────────────────────
+def generate_hypothetical_answer(query: str) -> str:
+    """
+    Ask the LLM to imagine what a perfect answer chunk would look like.
+    We embed this instead of (or alongside) the raw query.
+    
+    The hypothetical answer is intentionally kept short and factual —
+    we want it to look like one of our stored chunks, not a full response.
+    
+    Falls back to the raw query if the LLM call fails so retrieval
+    always proceeds.
+    """
+    hyde_prompt = f"""You are a search assistant. A user is searching a document database.
+Write a SHORT hypothetical passage (2-4 sentences) that would be the ideal answer 
+to the following question. Write it as if it were extracted from a real document or table.
+Do NOT say "I don't know". Always write a plausible passage.
+Do NOT include any explanation — output ONLY the passage itself.
+
+Question: {query}
+Passage:"""
+
+    try:
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": hyde_prompt}],
+            temperature=0.5,   # some creativity helps cover more semantic ground
+            max_tokens=150,    # keep it short — we want a chunk-like passage
+        )
+        hypothetical = response.choices[0].message.content.strip()
+        print(f"\n[HyDE] Generated: {hypothetical}")
+        return hypothetical
+    except Exception as e:
+        print(f"[HyDE] Failed, falling back to raw query: {e}")
+        return query
+
+
+def build_hyde_vector(query: str, embedder: SentenceTransformer) -> list:
+    """
+    Embed both the raw query and the hypothetical answer, then average them.
+    
+    Averaging is better than using just the hypothetical because:
+    - The raw query anchors intent (prevents HyDE from drifting too far)
+    - The hypothetical bridges the vocabulary gap to your chunks
+    - Together they cover more of the relevant embedding space
+    """
+    hypothetical = generate_hypothetical_answer(query)
+
+    vecs = embedder.encode(
+        [query, hypothetical],
+        normalize_embeddings=True,
+    )
+
+    # Average and re-normalize
+    import numpy as np
+    avg = (vecs[0] + vecs[1]) / 2.0
+    norm = np.linalg.norm(avg)
+    if norm > 0:
+        avg = avg / norm
+
+    return avg.tolist()
 
 
 # ── Text extraction ────────────────────────────────────────────────────────────
@@ -104,43 +362,31 @@ def ingest_document(
 ) -> int:
     from app.models import Chunk
     import pandas as pd
-    from pathlib import Path
 
-    ext = Path(file_path).suffix.lower()
+    ext      = Path(file_path).suffix.lower()
     embedder = get_embedder()
-    chunks = []
-    is_tabular = False
+    chunks   = []
 
     # ── BRANCH 1: Tabular Data (CSV/Excel) ──
     if ext in [".csv", ".xlsx", ".xls"]:
-        is_tabular = True
         try:
-            if ext == ".csv":
-                df = pd.read_csv(file_path)
-            else:
-                df = pd.read_excel(file_path)
+            df = pd.read_csv(file_path) if ext == ".csv" else pd.read_excel(file_path)
 
             df.columns = [str(c).strip() for c in df.columns]
             col_list   = ", ".join(df.columns.tolist())
             num_rows   = len(df)
             table_name = Path(filename).stem.replace("_", " ").replace("-", " ").title()
 
-            # ── Chunk 1: Schema header ───────────────────────────────────────
-            # Always the first chunk — orients the LLM to the full table structure.
-            # Also includes sample values per column so the embedder can match
-            # queries like "dr. sue" or "office visit" to the right columns.
+            # Schema header with sample values
             sample_lines = []
             for col in df.columns:
                 samples = (
-                    df[col]
-                    .dropna()
-                    .astype(str)
-                    .str.strip()
-                    .loc[lambda s: s != ""]
-                    .unique()[:3]
-                    .tolist()
+                    df[col].dropna().astype(str).str.strip()
+                    .loc[lambda s: s != ""].unique()[:3].tolist()
                 )
-                sample_lines.append(f"  - {col}: e.g. {', '.join(samples)}" if samples else f"  - {col}")
+                sample_lines.append(
+                    f"  - {col}: e.g. {', '.join(samples)}" if samples else f"  - {col}"
+                )
 
             schema_chunk = (
                 f"[Table: {table_name}]\n"
@@ -150,7 +396,7 @@ def ingest_document(
             )
             chunks.append(schema_chunk)
 
-            # ── Chunks 2+: Row windows ───────────────────────────────────────
+            # Row windows
             WINDOW_SIZE = 10
             OVERLAP     = 2
             step        = WINDOW_SIZE - OVERLAP
@@ -158,12 +404,10 @@ def ingest_document(
             for start in range(0, num_rows, step):
                 end    = min(start + WINDOW_SIZE, num_rows)
                 window = df.iloc[start:end]
-
-                lines = [
+                lines  = [
                     f"[Table: {table_name} | Columns: {col_list} | "
                     f"Rows {start + 1}–{end} of {num_rows}]"
                 ]
-
                 for row_idx, (_, row) in enumerate(window.iterrows(), start=start + 1):
                     pairs = [
                         f"{col}: {val}"
@@ -171,7 +415,6 @@ def ingest_document(
                         if pd.notna(val) and str(val).strip() != ""
                     ]
                     lines.append(f"  Row {row_idx}: " + " | ".join(pairs))
-
                 chunks.append("\n".join(lines))
 
         except Exception as e:
@@ -202,8 +445,6 @@ def ingest_document(
             chunk_index=i,
             text=chunk_text_item,
             embedding=embedding,
-            # chunk_index=0 is always the schema header for tabular files;
-            # callers can use this to always pull it alongside row chunks.
         ))
 
     db.add_all(rows)
@@ -219,20 +460,26 @@ def retrieve_chunks(
     get_k: int = TOP_K,
     offset: int = 0,
     document_ids: List[int] | None = None,
+    use_hyde: bool = True,
 ) -> dict:
 
     embedder = get_embedder()
-    query_vector = embedder.encode(
-        [query], normalize_embeddings=True
-    ).tolist()[0]
+
+    # Build query vector — use HyDE by default
+    if use_hyde:
+        query_vector = build_hyde_vector(query, embedder)
+    else:
+        query_vector = embedder.encode(
+            [query], normalize_embeddings=True
+        ).tolist()[0]
 
     params = {
-        "query_vec":       query_vector,
-        "business_id":     business_id,
-        "min_standard":    MIN_SCORE_STANDARD,
-        "min_tabular":     MIN_SCORE_TABULAR,
-        "limit_plus_one":  get_k + 1,
-        "offset":          offset,
+        "query_vec":      query_vector,
+        "business_id":    business_id,
+        "min_standard":   MIN_SCORE_STANDARD,
+        "min_tabular":    MIN_SCORE_TABULAR,
+        "limit_plus_one": get_k + 1,
+        "offset":         offset,
     }
 
     doc_filter_sql = ""
@@ -240,9 +487,6 @@ def retrieve_chunks(
         doc_filter_sql = "AND c.document_id = ANY(:doc_ids)"
         params["doc_ids"] = document_ids
 
-    # is_tabular: chunk_index=0 marks the schema header; any document that has
-    # a schema header is a tabular file. We use the per-document presence of
-    # chunk_index=0 with '[Table:' prefix to apply the lower threshold.
     sql = f"""
         WITH scored AS (
             SELECT
@@ -252,16 +496,12 @@ def retrieve_chunks(
                 c.document_id,
                 d.filename,
                 1 - (c.embedding <=> CAST(:query_vec AS vector)) AS score,
-                -- flag tabular chunks by their '[Table:' header prefix
                 (c.text LIKE '[Table:%%') AS is_tabular
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             WHERE c.business_id = :business_id
             {doc_filter_sql}
         ),
-        -- For every tabular document that has at least one chunk scoring above
-        -- the tabular threshold, also pull its schema header (chunk_index=0)
-        -- so the LLM always knows the column layout.
         tabular_headers AS (
             SELECT DISTINCT ON (c.document_id)
                 c.id,
@@ -269,8 +509,8 @@ def retrieve_chunks(
                 c.chunk_index,
                 c.document_id,
                 d.filename,
-                1.0 AS score,   -- give headers a guaranteed high score
-                TRUE  AS is_tabular
+                1.0 AS score,
+                TRUE AS is_tabular
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             WHERE c.business_id = :business_id
@@ -279,21 +519,18 @@ def retrieve_chunks(
               {doc_filter_sql}
               AND c.document_id IN (
                   SELECT document_id FROM scored
-                  WHERE is_tabular
-                    AND score >= :min_tabular
+                  WHERE is_tabular AND score >= :min_tabular
               )
         )
         SELECT id, text, chunk_index, document_id, filename, score
         FROM (
-            -- Row chunks that pass their respective threshold
             SELECT id, text, chunk_index, document_id, filename, score
             FROM scored
-            WHERE (is_tabular  AND score >= :min_tabular)
+            WHERE (is_tabular     AND score >= :min_tabular)
                OR (NOT is_tabular AND score >= :min_standard)
 
             UNION
 
-            -- Schema headers for matched tabular documents
             SELECT id, text, chunk_index, document_id, filename, score
             FROM tabular_headers
         ) combined
@@ -304,7 +541,6 @@ def retrieve_chunks(
 
     results = db.execute(text(sql), params).fetchall()
 
-    # Debug output
     for r in results[:8]:
         print("\n---")
         print("score:", r.score)
@@ -315,18 +551,16 @@ def retrieve_chunks(
     has_more = len(results) > get_k
     results  = results[:get_k]
 
-    formatted_results = [
-        {
-            "text":        row.text,
-            "filename":    row.filename,
-            "document_id": row.document_id,
-            "score":       float(round(row.score, 4)),
-        }
-        for row in results
-    ]
-
     return {
-        "results":    formatted_results,
+        "results": [
+            {
+                "text":        row.text,
+                "filename":    row.filename,
+                "document_id": row.document_id,
+                "score":       float(round(row.score, 4)),
+            }
+            for row in results
+        ],
         "hasMore":    has_more,
         "nextOffset": offset + get_k if has_more else None,
     }
@@ -334,7 +568,6 @@ def retrieve_chunks(
 
 # ── Delete ─────────────────────────────────────────────────────────────────────
 def delete_document_chunks(db: Session, document_id: int) -> None:
-    """Remove all chunks for a document."""
     from app.models import Chunk
     db.query(Chunk).filter(Chunk.document_id == document_id).delete()
     db.commit()

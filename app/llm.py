@@ -11,7 +11,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Initialize client once
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(
+    base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"),
+    api_key=os.getenv("OPENAI_API_KEY", "ollama"),
+)
+LLM_MODEL = os.getenv("LLM_MODEL", "mistral:7b")
 
 
 # ── Prompt builder ─────────────────────────────────────────────────────────────
@@ -80,7 +84,7 @@ QUESTION:
 # ── OpenAI call ───────────────────────────────────────────────────────────────
 def call_openai(prompt: str) -> str:
     response = client.chat.completions.create(
-        model="gpt-4o-mini",  # cheap + fast + strong for RAG
+        model=LLM_MODEL,  # cheap + fast + strong for RAG
         response_format={"type": "json_object"},
         messages=[
             {"role": "user", "content": prompt}
