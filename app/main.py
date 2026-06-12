@@ -84,7 +84,7 @@ async def upload_documents(
     print("BUSINESS ID:", business_id)
     print("FILES:", [f.filename for f in files])
     print('look here', business_id)
-    user = current_context
+    user, _ = current_context
     business = db.query(Business).filter(Business.id == business_id).first()
     if not business:
         return {"error": "Business not found"}
@@ -272,7 +272,11 @@ def ask_question(
             "hasMore": False,
             "nextOffset": None,
         }
-
+    print("OFFSET:", offset)
+    print("GET_K:", get_k)
+    print("ALL_RESULTS_COUNT:", len(all_results))
+    print("CHUNKS_COUNT:", len(chunks))
+    print("CHUNK_IDS:", [c.get("chunk_id") for c in chunks])
     answer = generate_answer(body.question, chunks)
 
     if offset == 0:
