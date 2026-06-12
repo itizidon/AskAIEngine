@@ -6,7 +6,13 @@ from app.database import get_db
 from sqlalchemy.orm import Session
 from app.routes.auth import router as auth_router
 from app.models import Business, User, Document, QueryLog
-from app.rag import ingest_document, retrieve_chunks_multi
+from app.rag import (ingest_document,
+    retrieve_chunks_multi,
+    get_active_query,
+    set_active_query,
+    clear_active_query,
+    normalize_query
+)
 from app.llm import generate_answer
 from pydantic import Field, BaseModel
 from app.auth import (
@@ -15,6 +21,26 @@ from app.auth import (
 import os
 import uuid
 from math import ceil
+
+
+def get_business_doc_state(db: Session, business_id: int) -> dict:
+    latest_doc = (
+        db.query(Document)
+        .filter(Document.business_id == business_id)
+        .order_by(Document.id.desc())
+        .first()
+    )
+
+    count = (
+        db.query(Document)
+        .filter(Document.business_id == business_id)
+        .count()
+    )
+
+    return {
+        "document_count": count,
+        "latest_document_id": latest_doc.id if latest_doc else None,
+    }
 
 class DocumentsRequest(BaseModel):
     business_ids: List[int]
@@ -53,6 +79,7 @@ async def upload_documents(
     files: List[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ):
+    
     print("🔥 UPLOAD HIT")
     print("BUSINESS ID:", business_id)
     print("FILES:", [f.filename for f in files])
@@ -102,7 +129,7 @@ async def upload_documents(
 
         # Remove temp file
         os.remove(temp_path)
-
+    clear_active_query(user.id)
     return {"uploaded": uploaded}
 
 from math import ceil
@@ -188,7 +215,6 @@ def ask_question(
 ):
     user, _ = current_context
 
-    # Security check
     allowed_business_ids = {b.id for b in user.businesses}
 
     if body.business_id not in allowed_business_ids:
@@ -197,53 +223,74 @@ def ask_question(
             detail="You do not have access to this business",
         )
 
-    print("USER:", user.id)
-    print("BUSINESS:", body.business_id)
+    get_k = body.get_k or 3
+    offset = body.offset or 0
 
-    # Safe version of the call with defaults
-    retrieval = retrieve_chunks_multi(
-        db=db,
-        business_id=body.business_id,
-        query=body.question,
-        get_k=body.get_k or 5,
-        offset=body.offset or 0,
+    current_doc_state = get_business_doc_state(db, body.business_id)
+    cached = get_active_query(user.id)
+
+    cache_is_valid = (
+        cached
+        and cached.get("question") == normalize_query(body.question)
+        and cached.get("business_id") == body.business_id
+        and cached.get("doc_state") == current_doc_state
     )
 
-    chunks = retrieval["results"]
+    if cache_is_valid:
+        print("[Active Query Cache] HIT")
+        all_results = cached["results"]
+    else:
+        print("[Active Query Cache] MISS")
+
+        retrieval = retrieve_chunks_multi(
+            db=db,
+            business_id=body.business_id,
+            query=body.question,
+            get_k=get_k,
+            offset=0,
+        )
+
+        all_results = retrieval["allResults"]
+
+        set_active_query(
+            user_id=user.id,
+            question=body.question,
+            business_id=body.business_id,
+            doc_state=current_doc_state,
+            results=all_results,
+        )
+
+    chunks = all_results[offset: offset + get_k]
+    has_more = len(all_results) > offset + get_k
+    next_offset = offset + get_k if has_more else None
 
     if not chunks:
         return {
             "answer": "I couldn't find that in your documents.",
             "sources": [],
-            "hasMore": retrieval["hasMore"],
-            "nextOffset": retrieval["nextOffset"],
+            "chunks_used": 0,
+            "hasMore": False,
+            "nextOffset": None,
         }
 
-    answer = generate_answer(
-        body.question,
-        chunks,
-    )
+    answer = generate_answer(body.question, chunks)
 
-    db.add(
-        QueryLog(
-            business_id=body.business_id,
-            query_text=body.question,
-            answer=answer,
+    if offset == 0:
+        db.add(
+            QueryLog(
+                business_id=body.business_id,
+                query_text=body.question,
+                answer=answer,
+            )
         )
-    )
-
-    print(answer,'answer')
-
-    db.commit()
+        db.commit()
 
     return {
         "answer": answer,
-        "sources": list(
-            {c["filename"] for c in chunks}
-        ),
+        "sources": list({c["filename"] for c in chunks}),
         "chunks_used": len(chunks),
-        "hasMore": retrieval["hasMore"],
-        "nextOffset": retrieval["nextOffset"],
+        "hasMore": has_more,
+        "nextOffset": next_offset,
     }
 
 @app.delete("/documents/{document_id}")

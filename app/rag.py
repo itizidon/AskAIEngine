@@ -5,6 +5,8 @@ Handles: document ingestion → chunking → embedding → PostgreSQL storage �
 import os
 import json
 from typing import List
+import redis
+from redis.exceptions import RedisError
 from pathlib import Path
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -13,6 +15,62 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from openai import OpenAI
 from dotenv import load_dotenv
 load_dotenv()
+
+redis_client = redis.Redis(
+    host="localhost",
+    port=6379,
+    db=0,
+    decode_responses=True,
+)
+
+ACTIVE_QUERY_TTL_SECONDS = 60 * 60 * 6  # 6 hours
+
+
+def normalize_query(query: str) -> str:
+    return " ".join(query.lower().strip().split())
+
+
+def get_active_query_key(user_id: int) -> str:
+    return f"active_query:{user_id}"
+
+
+def get_active_query(user_id: int) -> dict | None:
+    try:
+        data = redis_client.get(get_active_query_key(user_id))
+        if not data:
+            return None
+        return json.loads(data)
+    except (RedisError, json.JSONDecodeError):
+        return None
+
+
+def set_active_query(
+    user_id: int,
+    question: str,
+    business_id: int,
+    doc_state: dict,
+    results: list[dict],
+) -> None:
+    try:
+        redis_client.setex(
+            get_active_query_key(user_id),
+            ACTIVE_QUERY_TTL_SECONDS,
+            json.dumps({
+                "question": normalize_query(question),
+                "business_id": business_id,
+                "doc_state": doc_state,
+                "results": results,
+            }),
+        )
+    except RedisError as e:
+        print(f"[Redis] Failed to cache active query: {e}")
+
+
+def clear_active_query(user_id: int) -> None:
+    try:
+        redis_client.delete(get_active_query_key(user_id))
+    except RedisError:
+        pass
 
 # ── Multi-Query HyDE ───────────────────────────────────────────────────────────
 def generate_query_variants(query: str) -> List[str]:
@@ -66,6 +124,7 @@ def build_multi_hyde_vectors(query: str, embedder: SentenceTransformer) -> List[
 
     variants = generate_query_variants(query)
     vectors  = []
+    print('sdfasdfsad',variants,'variants')
 
     for variant in variants:
         try:
@@ -98,7 +157,6 @@ def retrieve_chunks_multi(
     """
     embedder = get_embedder()
     vectors  = build_multi_hyde_vectors(query, embedder)
-
     doc_filter_sql = ""
     base_params    = {
         "business_id":  business_id,
@@ -193,18 +251,24 @@ def retrieve_chunks_multi(
 
     has_more = len(merged) > (offset + get_k)
     page     = merged[offset: offset + get_k]
+    
+    formatted_results = [
+        {
+            "text":        r["text"],
+            "filename":    r["filename"],
+            "document_id": r["document_id"],
+            "score":       float(round(r["score"], 4)),
+        }
+        for r in merged
+    ]
+
+    has_more = len(formatted_results) > (offset + get_k)
+    page = formatted_results[offset: offset + get_k]
 
     return {
-        "results": [
-            {
-                "text":        r["text"],
-                "filename":    r["filename"],
-                "document_id": r["document_id"],
-                "score":       float(round(r["score"], 4)),
-            }
-            for r in page
-        ],
-        "hasMore":    has_more,
+        "results": page,
+        "allResults": formatted_results,
+        "hasMore": has_more,
         "nextOffset": offset + get_k if has_more else None,
     }
 
@@ -218,7 +282,7 @@ LLM_MODEL = os.getenv("LLM_MODEL", "mistral:7b")
 # ── Constants ──────────────────────────────────────────────────────────────────
 CHUNK_SIZE         = 500
 CHUNK_OVERLAP      = 100
-TOP_K              = 5
+TOP_K              = 3
 EMBED_MODEL        = "all-MiniLM-L6-v2"
 MIN_SCORE_STANDARD = 0.45
 MIN_SCORE_TABULAR  = 0.25
