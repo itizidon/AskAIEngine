@@ -83,6 +83,8 @@ export default function DashboardSearchMock() {
     fetchDocuments();
   }, [page]);
 
+  const PAGE_SIZE = 3;
+
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -95,51 +97,9 @@ export default function DashboardSearchMock() {
 
     setLoading(true);
     setAnswer("");
-
-    const initialOffset = 0;
+    setSources([]);
+    setHasMore(false);
     setOffset(0);
-
-    try {
-      const res = await fetch(
-        "http://localhost:8000/ask",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          credentials: "include",
-          body: JSON.stringify({
-            question,
-            business_id: selectedBusiness.id,
-            get_k: 3,
-            offset: initialOffset,
-          }),
-        }
-      );
-
-      const data = await res.json();
-
-      console.log(data, 'this is data');
-
-      setAnswer(data.answer.answers);
-      setSources(data.sources || []);
-      setHasMore(data.hasMore ?? false);
-    } catch (err) {
-      console.error(err);
-      setAnswer(
-        "Something went wrong while searching."
-      );
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleLoadMore = async () => {
-    if (!question.trim()) return;
-
-    setLoading(true);
-
-    const nextOffset = offset + 3; // match get_k
 
     try {
       const res = await fetch("http://localhost:8000/ask", {
@@ -150,28 +110,87 @@ export default function DashboardSearchMock() {
         credentials: "include",
         body: JSON.stringify({
           question,
-          get_k: 3,
-          offset: nextOffset,
-          business_id: selectedBusiness?.id,
+          business_id: selectedBusiness.id,
+          get_k: PAGE_SIZE,
+          offset: 0,
         }),
       });
 
+      const data = await res.json();
+
+      console.log("SEARCH DATA:", data);
+      console.log("SEARCH OFFSET SENT:", 0);
+
+      setAnswer(data?.answer?.answers ?? []);
+      setSources(data.sources || []);
+      setHasMore(data.hasMore ?? false);
+
+      // first page already loaded, so next Load More starts at PAGE_SIZE
+      setOffset(PAGE_SIZE);
+    } catch (err) {
+      console.error(err);
+      setAnswer("Something went wrong while searching.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleLoadMore = async () => {
+    if (!question.trim()) return;
+    if (!selectedBusiness) return;
+  
+    setLoading(true);
+  
+    const requestOffset = offset;
+  
+    console.log("LOAD MORE OFFSET SENT:", requestOffset);
+  
+    try {
+      const res = await fetch("http://localhost:8000/ask", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
+        body: JSON.stringify({
+          question,
+          business_id: selectedBusiness.id,
+          get_k: PAGE_SIZE,
+          offset: requestOffset,
+        }),
+      });
+  
       if (!res.ok) {
         throw new Error("Failed to fetch answer");
       }
-
+  
       const data = await res.json();
-      console.log(data, 'this is answer')
-      console.log(answer, "answer")
-      setAnswer([...answer, ...data?.answer?.answers]);
+  
+      console.log("LOAD MORE DATA:", data);
+  
+      setAnswer(prev => {
+        const combined = [
+          ...prev,
+          ...(data?.answer?.answers ?? []),
+        ];
+      
+        const seen = new Set();
+      
+        return combined.filter((item: any) => {
+          const key = item.fact.trim().toLowerCase();
+      
+          if (seen.has(key)) return false;
+      
+          seen.add(key);
+          return true;
+        });
+      });
+  
       setSources(data.sources || []);
-
-      // 🔥 update offset AFTER success
-      setOffset(nextOffset);
-
-      // optional: backend should control this
       setHasMore(data.hasMore ?? false);
-
+  
+      // move offset forward only after success
+      setOffset(prev => prev + PAGE_SIZE);
     } catch (err) {
       console.error(err);
       setAnswer("Something went wrong while searching.");
