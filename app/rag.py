@@ -49,21 +49,20 @@ def set_active_query(
     question: str,
     business_id: int,
     doc_state: dict,
-    results: list[dict],
-) -> None:
-    try:
-        redis_client.setex(
-            get_active_query_key(user_id),
-            ACTIVE_QUERY_TTL_SECONDS,
-            json.dumps({
-                "question": normalize_query(question),
-                "business_id": business_id,
-                "doc_state": doc_state,
-                "results": results,
-            }),
-        )
-    except RedisError as e:
-        print(f"[Redis] Failed to cache active query: {e}")
+    answers: list,
+    next_chunk_offset: int | None,
+):
+    redis_client.setex(
+        f"active_query:{user_id}",
+        ACTIVE_QUERY_TTL_SECONDS,
+        json.dumps({
+            "question": normalize_query(question),
+            "business_id": business_id,
+            "doc_state": doc_state,
+            "answers": answers,
+            "next_chunk_offset": next_chunk_offset,
+        }),
+    )
 
 
 def clear_active_query(user_id: int) -> None:

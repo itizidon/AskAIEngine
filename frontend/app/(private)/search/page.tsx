@@ -4,6 +4,7 @@ import { useBusiness } from "@/app/context/BusinessContext";
 import { useState, useRef, useEffect } from "react";
 
 const ACCEPTED_TYPES = ".pdf,.txt,.md,.docx,.csv,.xlsx,.xls";;
+const PAGE_SIZE = 10;
 
 interface Doc {
   id: string; // temporary frontend ID
@@ -40,7 +41,7 @@ export default function DashboardSearchMock() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
-  const [offset, setOffset] = useState(0);
+  const [offset, setOffset] = useState<number | null>(0);
   const [hasMore, setHasMore] = useState(false);
   const [sources, setSources] = useState<{ id: number; filename: string }[]>([]);
   console.log(docs)
@@ -87,20 +88,20 @@ export default function DashboardSearchMock() {
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
-
+  
     if (!question.trim()) return;
-
+  
     if (!selectedBusiness) {
       alert("Please select a business first");
       return;
     }
-
+  
     setLoading(true);
-    setAnswer("");
+    setAnswer([]);
     setSources([]);
     setHasMore(false);
     setOffset(0);
-
+  
     try {
       const res = await fetch("http://localhost:8000/ask", {
         method: "POST",
@@ -115,18 +116,15 @@ export default function DashboardSearchMock() {
           offset: 0,
         }),
       });
-
+  
       const data = await res.json();
-
+  
       console.log("SEARCH DATA:", data);
-      console.log("SEARCH OFFSET SENT:", 0);
-
+  
       setAnswer(data?.answer?.answers ?? []);
       setSources(data.sources || []);
       setHasMore(data.hasMore ?? false);
-
-      // first page already loaded, so next Load More starts at PAGE_SIZE
-      setOffset(PAGE_SIZE);
+      setOffset(data.nextOffset ?? PAGE_SIZE);
     } catch (err) {
       console.error(err);
       setAnswer("Something went wrong while searching.");
@@ -138,14 +136,13 @@ export default function DashboardSearchMock() {
   const handleLoadMore = async () => {
     if (!question.trim()) return;
     if (!selectedBusiness) return;
+    if (offset === null) return;
   
     setLoading(true);
   
-    const requestOffset = offset;
-  
-    console.log("LOAD MORE OFFSET SENT:", requestOffset);
-  
     try {
+      console.log("LOAD MORE ANSWER OFFSET:", offset);
+  
       const res = await fetch("http://localhost:8000/ask", {
         method: "POST",
         headers: {
@@ -156,7 +153,7 @@ export default function DashboardSearchMock() {
           question,
           business_id: selectedBusiness.id,
           get_k: PAGE_SIZE,
-          offset: requestOffset,
+          offset,
         }),
       });
   
@@ -168,29 +165,14 @@ export default function DashboardSearchMock() {
   
       console.log("LOAD MORE DATA:", data);
   
-      setAnswer(prev => {
-        const combined = [
-          ...prev,
-          ...(data?.answer?.answers ?? []),
-        ];
-      
-        const seen = new Set();
-      
-        return combined.filter((item: any) => {
-          const key = item.fact.trim().toLowerCase();
-      
-          if (seen.has(key)) return false;
-      
-          seen.add(key);
-          return true;
-        });
-      });
+      setAnswer(prev => [
+        ...prev,
+        ...(data?.answer?.answers ?? []),
+      ]);
   
       setSources(data.sources || []);
       setHasMore(data.hasMore ?? false);
-  
-      // move offset forward only after success
-      setOffset(prev => prev + PAGE_SIZE);
+      setOffset(data.nextOffset ?? null);
     } catch (err) {
       console.error(err);
       setAnswer("Something went wrong while searching.");

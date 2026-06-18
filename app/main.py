@@ -207,6 +207,10 @@ def get_my_businesses(
         ]
     }
 
+ANSWER_PAGE_SIZE = 10
+CHUNK_BATCH_SIZE = 3
+
+
 @app.post("/ask")
 def ask_question(
     body: AskRequest,
@@ -223,9 +227,7 @@ def ask_question(
             detail="You do not have access to this business",
         )
 
-    get_k = body.get_k or 3
-    offset = body.offset or 0
-
+    answer_offset = body.offset or 0
     current_doc_state = get_business_doc_state(db, body.business_id)
     cached = get_active_query(user.id)
 
@@ -237,62 +239,76 @@ def ask_question(
     )
 
     if cache_is_valid:
-        print("[Active Query Cache] HIT")
-        all_results = cached["results"]
+        all_answers = cached.get("answers", [])
+        next_chunk_offset = cached.get("next_chunk_offset", 0)
     else:
-        print("[Active Query Cache] MISS")
+        all_answers = []
+        next_chunk_offset = 0
 
+    # If cache does not have enough answers for this requested page,
+    # retrieve the next 3 chunks and generate more answers.
+    while (
+        len(all_answers) < answer_offset + ANSWER_PAGE_SIZE
+        and next_chunk_offset is not None
+    ):
         retrieval = retrieve_chunks_multi(
             db=db,
             business_id=body.business_id,
             query=body.question,
-            get_k=get_k,
-            offset=0,
+            get_k=CHUNK_BATCH_SIZE,
+            offset=next_chunk_offset,
         )
 
-        all_results = retrieval["allResults"]
+        chunks = retrieval["results"]
 
-        set_active_query(
-            user_id=user.id,
-            question=body.question,
-            business_id=body.business_id,
-            doc_state=current_doc_state,
-            results=all_results,
-        )
+        if not chunks:
+            next_chunk_offset = None
+            break
 
-    chunks = all_results[offset: offset + get_k]
-    has_more = len(all_results) > offset + get_k
-    next_offset = offset + get_k if has_more else None
+        generated = generate_answer(body.question, chunks)
+        new_answers = generated.get("answers", [])
 
-    if not chunks:
-        return {
-            "answer": "I couldn't find that in your documents.",
-            "sources": [],
-            "chunks_used": 0,
-            "hasMore": False,
-            "nextOffset": None,
-        }
-    print("OFFSET:", offset)
-    print("GET_K:", get_k)
-    print("ALL_RESULTS_COUNT:", len(all_results))
-    print("CHUNKS_COUNT:", len(chunks))
-    print("CHUNK_IDS:", [c.get("chunk_id") for c in chunks])
-    answer = generate_answer(body.question, chunks)
+        all_answers.extend(new_answers)
 
-    if offset == 0:
-        db.add(
-            QueryLog(
-                business_id=body.business_id,
-                query_text=body.question,
-                answer=answer,
-            )
-        )
-        db.commit()
+        next_chunk_offset = retrieval["nextOffset"]
+
+        # important: only fetch one new chunk batch per Load More click
+        break
+
+    set_active_query(
+        user_id=user.id,
+        question=body.question,
+        business_id=body.business_id,
+        doc_state=current_doc_state,
+        answers=all_answers,
+        next_chunk_offset=next_chunk_offset,
+    )
+
+    page_answers = all_answers[
+        answer_offset : answer_offset + ANSWER_PAGE_SIZE
+    ]
+
+    has_more = (
+        answer_offset + ANSWER_PAGE_SIZE < len(all_answers)
+        or next_chunk_offset is not None
+    )
+
+    next_offset = (
+        answer_offset + ANSWER_PAGE_SIZE
+        if has_more
+        else None
+    )
 
     return {
-        "answer": answer,
-        "sources": list({c["filename"] for c in chunks}),
-        "chunks_used": len(chunks),
+        "answer": {
+            "answers": page_answers,
+        },
+        "sources": list({
+            source["filename"]
+            for item in page_answers
+            for source in item.get("sources", [])
+        }),
+        "chunks_used": CHUNK_BATCH_SIZE,
         "hasMore": has_more,
         "nextOffset": next_offset,
     }
