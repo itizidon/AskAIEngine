@@ -6,7 +6,13 @@ from app.database import get_db
 from sqlalchemy.orm import Session
 from app.routes.auth import router as auth_router
 from app.models import Business, User, Document, QueryLog
-from app.rag import ingest_document, retrieve_chunks_multi
+from app.rag import (ingest_document,
+    retrieve_chunks_multi,
+    get_active_query,
+    set_active_query,
+    clear_active_query,
+    normalize_query
+)
 from app.llm import generate_answer
 from pydantic import Field, BaseModel
 from app.auth import (
@@ -15,6 +21,26 @@ from app.auth import (
 import os
 import uuid
 from math import ceil
+
+
+def get_business_doc_state(db: Session, business_id: int) -> dict:
+    latest_doc = (
+        db.query(Document)
+        .filter(Document.business_id == business_id)
+        .order_by(Document.id.desc())
+        .first()
+    )
+
+    count = (
+        db.query(Document)
+        .filter(Document.business_id == business_id)
+        .count()
+    )
+
+    return {
+        "document_count": count,
+        "latest_document_id": latest_doc.id if latest_doc else None,
+    }
 
 class DocumentsRequest(BaseModel):
     business_ids: List[int]
@@ -53,11 +79,12 @@ async def upload_documents(
     files: List[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ):
+    
     print("🔥 UPLOAD HIT")
     print("BUSINESS ID:", business_id)
     print("FILES:", [f.filename for f in files])
     print('look here', business_id)
-    user = current_context
+    user, _ = current_context
     business = db.query(Business).filter(Business.id == business_id).first()
     if not business:
         return {"error": "Business not found"}
@@ -102,7 +129,7 @@ async def upload_documents(
 
         # Remove temp file
         os.remove(temp_path)
-
+    clear_active_query(user.id)
     return {"uploaded": uploaded}
 
 from math import ceil
@@ -180,6 +207,16 @@ def get_my_businesses(
         ]
     }
 
+ANSWER_PAGE_SIZE = 10
+CHUNK_BATCH_SIZE = 3
+RETRIEVAL_POOL_SIZE = 50
+
+
+ANSWER_PAGE_SIZE = 10
+CHUNK_BATCH_SIZE = 3
+RETRIEVAL_POOL_SIZE = 50
+
+
 @app.post("/ask")
 def ask_question(
     body: AskRequest,
@@ -188,7 +225,6 @@ def ask_question(
 ):
     user, _ = current_context
 
-    # Security check
     allowed_business_ids = {b.id for b in user.businesses}
 
     if body.business_id not in allowed_business_ids:
@@ -197,53 +233,170 @@ def ask_question(
             detail="You do not have access to this business",
         )
 
-    print("USER:", user.id)
-    print("BUSINESS:", body.business_id)
+    answer_offset = body.offset or 0
+    current_doc_state = get_business_doc_state(db, body.business_id)
+    cached = get_active_query(user.id)
 
-    # Safe version of the call with defaults
-    retrieval = retrieve_chunks_multi(
-        db=db,
-        business_id=body.business_id,
-        query=body.question,
-        get_k=body.get_k or 5,
-        offset=body.offset or 0,
+    cache_is_valid = (
+        cached
+        and cached.get("question") == normalize_query(body.question)
+        and cached.get("business_id") == body.business_id
+        and cached.get("doc_state") == current_doc_state
     )
 
-    chunks = retrieval["results"]
+    if cache_is_valid:
+        print("\n================ CACHE HIT ================")
+        print("QUESTION:", body.question)
+        print("ANSWER OFFSET:", answer_offset)
 
-    if not chunks:
+        all_answers = cached.get("answers", [])
+        retrieval_results = cached.get("retrieval_results", [])
+        next_chunk_offset = cached.get("next_chunk_offset", 0)
+
+        print("CACHED ANSWERS:", len(all_answers))
+        print("RETRIEVAL RESULTS:", len(retrieval_results))
+        print("NEXT CHUNK OFFSET:", next_chunk_offset)
+        print("==========================================\n")
+    else:
+        print("\n================ CACHE MISS ================")
+        print("QUESTION:", body.question)
+        print("ANSWER OFFSET:", answer_offset)
+        print("===========================================\n")
+
+        retrieval = retrieve_chunks_multi(
+            db=db,
+            business_id=body.business_id,
+            query=body.question,
+            get_k=RETRIEVAL_POOL_SIZE,
+            offset=0,
+        )
+
+        all_answers = []
+        retrieval_results = retrieval["allResults"]
+        next_chunk_offset = 0
+
+    print("\n----- CACHE PAGE CHECK -----")
+    print("ANSWER OFFSET:", answer_offset)
+    print("CACHED ANSWERS:", len(all_answers))
+    print("HAS ANSWERS FOR OFFSET?:", len(all_answers) > answer_offset)
+    print("----------------------------\n")
+
+    if len(all_answers) >= answer_offset + ANSWER_PAGE_SIZE:
+        page_answers = all_answers[
+            answer_offset : answer_offset + ANSWER_PAGE_SIZE
+        ]
+
+        has_more = (
+            answer_offset + ANSWER_PAGE_SIZE < len(all_answers)
+            or next_chunk_offset is not None
+        )
+
+        next_offset = (
+            answer_offset + ANSWER_PAGE_SIZE
+            if has_more
+            else None
+        )
+
+        print("\n***** RETURNING FROM CACHE *****")
+        print("PAGE ANSWERS:", len(page_answers))
+        print("ANSWER RANGE:", answer_offset, "->", answer_offset + ANSWER_PAGE_SIZE)
+        print("HAS MORE:", has_more)
+        print("NEXT OFFSET:", next_offset)
+        print("********************************\n")
+
         return {
-            "answer": "I couldn't find that in your documents.",
-            "sources": [],
-            "hasMore": retrieval["hasMore"],
-            "nextOffset": retrieval["nextOffset"],
+            "answer": {
+                "answers": page_answers,
+            },
+            "sources": list({
+                source["filename"]
+                for item in page_answers
+                for source in item.get("sources", [])
+            }),
+            "chunks_used": 0,
+            "hasMore": has_more,
+            "nextOffset": next_offset,
+            "fromCache": True,
         }
 
-    answer = generate_answer(
-        body.question,
-        chunks,
+    if next_chunk_offset is not None:
+        chunks = retrieval_results[
+            next_chunk_offset : next_chunk_offset + CHUNK_BATCH_SIZE
+        ]
+
+        if chunks:
+            print("\n##### GENERATING NEW ANSWERS #####")
+            print("CHUNK BATCH SIZE:", len(chunks))
+            print("NEXT CHUNK OFFSET:", next_chunk_offset)
+            print("CURRENT ANSWERS:", len(all_answers))
+            print("##################################\n")
+
+            generated = generate_answer(body.question, chunks)
+            new_answers = generated.get("answers", [])
+
+            print("\n+++++ GENERATED ANSWERS +++++")
+            print("NEW ANSWERS:", len(new_answers))
+            print("TOTAL ANSWERS:", len(all_answers) + len(new_answers))
+            print("++++++++++++++++++++++++++++\n")
+
+            all_answers.extend(new_answers)
+
+            next_chunk_offset += CHUNK_BATCH_SIZE
+
+            if next_chunk_offset >= len(retrieval_results):
+                next_chunk_offset = None
+        else:
+            next_chunk_offset = None
+
+    print("\n===== SAVING CACHE =====")
+    print("TOTAL ANSWERS:", len(all_answers))
+    print("NEXT CHUNK OFFSET:", next_chunk_offset)
+    print("========================\n")
+
+    set_active_query(
+        user_id=user.id,
+        question=body.question,
+        business_id=body.business_id,
+        doc_state=current_doc_state,
+        answers=all_answers,
+        retrieval_results=retrieval_results,
+        next_chunk_offset=next_chunk_offset,
     )
 
-    db.add(
-        QueryLog(
-            business_id=body.business_id,
-            query_text=body.question,
-            answer=answer,
-        )
+    page_answers = all_answers[
+        answer_offset : answer_offset + ANSWER_PAGE_SIZE
+    ]
+
+    has_more = (
+        answer_offset + ANSWER_PAGE_SIZE < len(all_answers)
+        or next_chunk_offset is not None
     )
 
-    print(answer,'answer')
+    next_offset = (
+        answer_offset + ANSWER_PAGE_SIZE
+        if has_more
+        else None
+    )
 
-    db.commit()
+    print("\n===== FINAL RESPONSE =====")
+    print("PAGE ANSWERS:", len(page_answers))
+    print("HAS MORE:", has_more)
+    print("NEXT OFFSET:", next_offset)
+    print("==========================\n")
 
     return {
-        "answer": answer,
-        "sources": list(
-            {c["filename"] for c in chunks}
-        ),
-        "chunks_used": len(chunks),
-        "hasMore": retrieval["hasMore"],
-        "nextOffset": retrieval["nextOffset"],
+        "answer": {
+            "answers": page_answers,
+        },
+        "sources": list({
+            source["filename"]
+            for item in page_answers
+            for source in item.get("sources", [])
+        }),
+        "chunks_used": CHUNK_BATCH_SIZE,
+        "hasMore": has_more,
+        "nextOffset": next_offset,
+        "fromCache": False,
     }
 
 @app.delete("/documents/{document_id}")

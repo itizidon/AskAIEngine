@@ -4,6 +4,7 @@ import { useBusiness } from "@/app/context/BusinessContext";
 import { useState, useRef, useEffect } from "react";
 
 const ACCEPTED_TYPES = ".pdf,.txt,.md,.docx,.csv,.xlsx,.xls";;
+const PAGE_SIZE = 10;
 
 interface Doc {
   id: string; // temporary frontend ID
@@ -40,7 +41,7 @@ export default function DashboardSearchMock() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
-  const [offset, setOffset] = useState(0);
+  const [offset, setOffset] = useState<number | null>(0);
   const [hasMore, setHasMore] = useState(false);
   const [sources, setSources] = useState<{ id: number; filename: string }[]>([]);
   console.log(docs)
@@ -83,64 +84,24 @@ export default function DashboardSearchMock() {
     fetchDocuments();
   }, [page]);
 
+  const PAGE_SIZE = 3;
+
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
-
+  
     if (!question.trim()) return;
-
+  
     if (!selectedBusiness) {
       alert("Please select a business first");
       return;
     }
-
+  
     setLoading(true);
-    setAnswer("");
-
-    const initialOffset = 0;
+    setAnswer([]);
+    setSources([]);
+    setHasMore(false);
     setOffset(0);
-
-    try {
-      const res = await fetch(
-        "http://localhost:8000/ask",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          credentials: "include",
-          body: JSON.stringify({
-            question,
-            business_id: selectedBusiness.id,
-            get_k: 3,
-            offset: initialOffset,
-          }),
-        }
-      );
-
-      const data = await res.json();
-
-      console.log(data, 'this is data');
-
-      setAnswer(data.answer.answers);
-      setSources(data.sources || []);
-      setHasMore(data.hasMore ?? false);
-    } catch (err) {
-      console.error(err);
-      setAnswer(
-        "Something went wrong while searching."
-      );
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleLoadMore = async () => {
-    if (!question.trim()) return;
-
-    setLoading(true);
-
-    const nextOffset = offset + 3; // match get_k
-
+  
     try {
       const res = await fetch("http://localhost:8000/ask", {
         method: "POST",
@@ -150,28 +111,68 @@ export default function DashboardSearchMock() {
         credentials: "include",
         body: JSON.stringify({
           question,
-          get_k: 3,
-          offset: nextOffset,
-          business_id: selectedBusiness?.id,
+          business_id: selectedBusiness.id,
+          get_k: PAGE_SIZE,
+          offset: 0,
         }),
       });
+  
+      const data = await res.json();
+  
+      console.log("SEARCH DATA:", data);
+  
+      setAnswer(data?.answer?.answers ?? []);
+      setSources(data.sources || []);
+      setHasMore(data.hasMore ?? false);
+      setOffset(data.nextOffset ?? PAGE_SIZE);
+    } catch (err) {
+      console.error(err);
+      setAnswer("Something went wrong while searching.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
+  const handleLoadMore = async () => {
+    if (!question.trim()) return;
+    if (!selectedBusiness) return;
+    if (offset === null) return;
+  
+    setLoading(true);
+  
+    try {
+      console.log("LOAD MORE ANSWER OFFSET:", offset);
+  
+      const res = await fetch("http://localhost:8000/ask", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
+        body: JSON.stringify({
+          question,
+          business_id: selectedBusiness.id,
+          get_k: PAGE_SIZE,
+          offset,
+        }),
+      });
+  
       if (!res.ok) {
         throw new Error("Failed to fetch answer");
       }
-
+  
       const data = await res.json();
-      console.log(data, 'this is answer')
-      console.log(answer, "answer")
-      setAnswer([...answer, ...data?.answer?.answers]);
+  
+      console.log("LOAD MORE DATA:", data);
+  
+      setAnswer(prev => [
+        ...prev,
+        ...(data?.answer?.answers ?? []),
+      ]);
+  
       setSources(data.sources || []);
-
-      // 🔥 update offset AFTER success
-      setOffset(nextOffset);
-
-      // optional: backend should control this
       setHasMore(data.hasMore ?? false);
-
+      setOffset(data.nextOffset ?? null);
     } catch (err) {
       console.error(err);
       setAnswer("Something went wrong while searching.");
