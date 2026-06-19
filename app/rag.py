@@ -50,6 +50,7 @@ def set_active_query(
     business_id: int,
     doc_state: dict,
     answers: list,
+    retrieval_results: list,
     next_chunk_offset: int | None,
 ):
     redis_client.setex(
@@ -60,6 +61,7 @@ def set_active_query(
             "business_id": business_id,
             "doc_state": doc_state,
             "answers": answers,
+            "retrieval_results": retrieval_results,
             "next_chunk_offset": next_chunk_offset,
         }),
     )
