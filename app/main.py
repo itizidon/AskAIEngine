@@ -27,6 +27,17 @@ class AskRequest(BaseModel):
     offset: int
     business_id: int
 
+
+class CreateBusinessRequest(BaseModel):
+    name: str
+
+
+class BusinessResponse(BaseModel):
+    id: int
+    name: str
+
+    model_config = {"from_attributes": True}
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -114,7 +125,7 @@ def get_documents(
     db: Session = Depends(get_db),
     current_context=Depends(get_current_user),
 ):
-    user, _ = current_context
+    user = current_context
 
     # Security: ensure user actually has access to these businesses
     allowed_business_ids = {b.id for b in user.businesses}
@@ -186,7 +197,7 @@ def ask_question(
     db: Session = Depends(get_db),
     current_context=Depends(get_current_user),
 ):
-    user, _ = current_context
+    user = current_context
 
     # Security check
     allowed_business_ids = {b.id for b in user.businesses}
@@ -246,79 +257,132 @@ def ask_question(
         "nextOffset": retrieval["nextOffset"],
     }
 
+from fastapi import Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+
 @app.delete("/documents/{document_id}")
 def delete_document(
     document_id: int,
+    business_id: int = Query(...),
     db: Session = Depends(get_db),
-    current_context = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    user, business_id = current_context
+    business = db.query(Business).filter(Business.id == business_id).first()
 
-    # 1. Find document (and ensure it belongs to the user’s business)
+    if not business:
+        raise HTTPException(404, "Business not found")
+
+    if business.id not in {b.id for b in current_user.businesses}:
+        raise HTTPException(403, "No access")
+
+    if business.subscription_status != "active":
+        raise HTTPException(403, "Subscription required")
+
+    # Find document
     doc = (
         db.query(Document)
         .filter(
             Document.id == document_id,
-            Document.business_id == business_id
+            Document.business_id == business_id,
         )
         .first()
     )
 
     if not doc:
-        return {"error": "Document not found"}
+        raise HTTPException(
+            status_code=404,
+            detail="Document not found",
+        )
 
-    # 2. Delete related chunks first
+    # Delete chunks first
     from app.models import Chunk
-    db.query(Chunk).filter(Chunk.document_id == document_id).delete()
 
-    # 3. Delete document
+    db.query(Chunk).filter(
+        Chunk.document_id == document_id
+    ).delete()
+
+    # Delete document
     db.delete(doc)
     db.commit()
 
-    return {"message": "Document deleted successfully"}
-
-
-@app.get("/queries/recent")
-def get_recent_queries(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(10, ge=1, le=50),
-    db: Session = Depends(get_db),
-    current_context = Depends(get_current_user),
-):
-    user, business_id = current_context
-
-    if not business_id:
-        return {"error": "No business found"}
-
-    query = (
-        db.query(QueryLog)
-        .filter(QueryLog.business_id == business_id)
-        .order_by(QueryLog.id.desc())
-    )
-
-    total = query.count()
-
-    queries = (
-        query
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-        .all()
-    )
+    # Clear active query cache
+    # clear_active_query(current_user.id)
 
     return {
-        "page": page,
-        "page_size": page_size,
-        "total": total,
-        "has_more": page * page_size < total,
-        "queries": [
-            {
-                "id": q.id,
-                "question": q.query_text,
-                "answer": q.answer,
-            }
-            for q in queries
-        ],
+        "message": "Document deleted successfully"
     }
+
+
+@app.post("/businesses", response_model=BusinessResponse)
+def create_business_route(
+    body: CreateBusinessRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    business_name = body.name.strip()
+
+    if not business_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Business name is required",
+        )
+
+    business = Business(
+        name=business_name,
+    )
+
+    db.add(business)
+    db.commit()
+    db.refresh(business)
+
+    current_user.businesses.append(business)
+
+    db.commit()
+    db.refresh(current_user)
+
+    return business
+
+# @app.get("/queries/recent")
+# def get_recent_queries(
+#     page: int = Query(1, ge=1),
+#     page_size: int = Query(10, ge=1, le=50),
+#     db: Session = Depends(get_db),
+#     current_context = Depends(get_current_user),
+# ):
+#     user = current_context
+
+#     # if not business_id:
+#     #     return {"error": "No business found"}
+
+#     query = (
+#         db.query(QueryLog)
+#         .filter(QueryLog.business_id == business_id)
+#         .order_by(QueryLog.id.desc())
+#     )
+
+#     total = query.count()
+
+#     queries = (
+#         query
+#         .offset((page - 1) * page_size)
+#         .limit(page_size)
+#         .all()
+#     )
+
+#     return {
+#         "page": page,
+#         "page_size": page_size,
+#         "total": total,
+#         "has_more": page * page_size < total,
+#         "queries": [
+#             {
+#                 "id": q.id,
+#                 "question": q.query_text,
+#                 "answer": q.answer,
+#             }
+#             for q in queries
+#         ],
+#     }
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
