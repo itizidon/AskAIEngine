@@ -44,6 +44,7 @@ PLAN_CONFIG = {
         "display_name":     "Free",
         "max_businesses":   1,
         "max_users":        2,
+        "max_organizations": 1,
     },
     "starter": {
         "monthly_searches": 2000,
@@ -56,6 +57,7 @@ PLAN_CONFIG = {
         "display_name":     "Starter",
         "max_businesses":   3,
         "max_users":        10,
+        "max_organizations": 1,
     },
 }
 

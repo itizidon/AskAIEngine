@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.database import get_db
 from sqlalchemy.orm import Session
 from app.routes.auth import router as auth_router
-from app.models import Business, User, Document, QueryLog, Organization
+from app.models import Business, User, Document, QueryLog, Organization, OrgMember
 from app.rag import (
     ingest_document,
     retrieve_chunks,
@@ -400,6 +400,75 @@ def delete_document(
     clear_active_query(user.id)
     return {"message": "Document deleted successfully"}
 
+class OrgCreateSchema(BaseModel):
+    name: str
+
+
+class OrgResponseSchema(BaseModel):
+    id: int
+    name: str
+    owner_id: int
+    plan: str
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
+@app.post(
+    "/organizations", 
+    response_model=OrgResponseSchema, 
+    status_code=status.HTTP_201_CREATED
+)
+async def create_organization(
+    payload: OrgCreateSchema, 
+    db: Session = Depends(get_db), 
+    current_auth = Depends(get_current_user)
+):
+    """
+    Creates an organization workspace. Hardcodes a protection limit of 1 
+    active organization per account to safeguard MVP multi-tenancy rules.
+    """
+    user, _ = current_auth
+    
+    # 1. Enforce MVP hard limits (1 Org maximum)
+    owned_org_count = db.query(Organization).filter(Organization.owner_id == user.id).count()
+    if owned_org_count >= 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Account limit reached: Your current subscription tier allows a maximum of 1 active organization workspace."
+        )
+        
+    try:
+        # 2. Instantiate and add the new Organization record
+        new_org = Organization(
+            name=payload.name,
+            owner_id=user.id,
+            plan="free",  # Defaulting to free tier cleanly
+            is_active=True
+        )
+        db.add(new_org)
+        db.flush()  # Generates new_org.id right away without closing the transaction
+
+        # 3. Automatically append the owner to the organizational membership roster
+        org_membership = OrgMember(
+            org_id=new_org.id,
+            user_id=user.id,
+            role="admin"  # The system initialization creator defaults to admin
+        )
+        db.add(org_membership)
+        
+        # 4. Save both operations securely in a single atomic save
+        db.commit()
+        db.refresh(new_org)
+        
+        return new_org
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to provision system workspace metadata safely: {str(e)}"
+        )
 
 @app.post("/businesses", response_model=BusinessResponse)
 def create_business_route(
