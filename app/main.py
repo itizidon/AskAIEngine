@@ -1,6 +1,6 @@
 import uvicorn
-from fastapi import FastAPI, UploadFile, File, Depends, Query, HTTPException, Form
-from typing import List
+from fastapi import FastAPI, UploadFile, File, Depends, Query, HTTPException, Form, status
+from typing import List, Tuple
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import get_db
 from sqlalchemy.orm import Session
@@ -37,6 +37,20 @@ class BusinessResponse(BaseModel):
     name: str
 
     model_config = {"from_attributes": True}
+
+class DocumentRequest(BaseModel):
+    business_ids: List[int]
+    page: int = 1
+    page_size: int = 50
+
+class DocumentResponseItem(BaseModel):
+    id: int
+    name: str
+    type: str
+    status: str # Matches your DB status column ("ready", "processing", etc.)
+
+class DocumentListResponse(BaseModel):
+    documents: List[DocumentResponseItem]
 
 app = FastAPI()
 app.add_middleware(
@@ -119,63 +133,63 @@ async def upload_documents(
 from math import ceil
 from fastapi import Query
 
-@app.post("/documents")
-def get_documents(
-    body: DocumentsRequest,
+# 2. Fully Resolved Route matching your exact SQLAlchemy attributes
+@app.post(
+    "/documents", 
+    response_model=DocumentListResponse,
+    status_code=status.HTTP_200_OK
+)
+async def get_documents(
+    payload: DocumentRequest,
     db: Session = Depends(get_db),
-    current_context=Depends(get_current_user),
+    current_auth: Tuple[User, str] = Depends(get_current_user)
 ):
-    user = current_context
-
-    # Security: ensure user actually has access to these businesses
+    """
+    Fetch and paginate structural documents matching verified business scopes.
+    """
+    # Unpack securely from your auth system tuple
+    user, token = current_auth
+    
+    # Map out the business IDs this specific user belongs to
     allowed_business_ids = {b.id for b in user.businesses}
-
-    requested_ids = [
-        bid for bid in body.business_ids
-        if bid in allowed_business_ids
-    ]
-
-    if not requested_ids:
-        return {"error": "No valid businesses selected"}
-
-    query = db.query(Document).filter(
-        Document.business_id.in_(requested_ids)
-    )
-
-    total_docs = query.count()
-    total_pages = (
-        ceil(total_docs / body.page_size)
-        if total_docs > 0
-        else 1
-    )
-
-    documents = (
-        query
-        .order_by(Document.id.desc())
-        .offset((body.page - 1) * body.page_size)
-        .limit(body.page_size)
+    
+    # Multi-tenant protection guard block
+    for requested_id in payload.business_ids:
+        if requested_id not in allowed_business_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Not authorized to view materials for workspace ID: {requested_id}"
+            )
+            
+    # Calculate offset limit values
+    offset = (payload.page - 1) * payload.page_size
+    
+    # Query database documents based on incoming filters
+    query_results = (
+        db.query(Document)
+        .filter(Document.business_id.in_(payload.business_ids))
+        .order_by(Document.created_at.desc()) # Newest first looks great on your dashboard
+        .offset(offset)
+        .limit(payload.page_size)
         .all()
     )
-
-    docs_list = [
-        {
-            "id": str(doc.id),
-            "name": doc.filename,
-            "type": os.path.splitext(doc.filename)[1]
-                .replace(".", "")
-                .upper(),
-            "business_id": doc.business_id,
-        }
-        for doc in documents
-    ]
-
-    return {
-        "page": body.page,
-        "page_size": body.page_size,
-        "total_pages": total_pages,
-        "total_documents": total_docs,
-        "documents": docs_list,
-    }
+    
+    # Format and dynamically parse properties cleanly matching your frontend slide-over
+    formatted_docs = []
+    for doc in query_results:
+        # Extract the extension out of the filename string safely
+        ext = doc.filename.split(".")[-1].upper() if "." in doc.filename else "FILE"
+        
+        formatted_docs.append(
+            DocumentResponseItem(
+                id=doc.id,
+                name=doc.filename,  # Fixed: Maps accurately to Document.filename
+                type=ext,
+                status=doc.status   # Fixed: Grabs your real DB status string
+            )
+        )
+    
+    return DocumentListResponse(documents=formatted_docs)
 
 @app.get("/me/businesses")
 def get_my_businesses(
