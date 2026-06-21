@@ -242,18 +242,18 @@ export default function AdminDashboard() {
 
 // Fixed background targets map matching dashboard layout environments
 const s: Record<string, React.CSSProperties> = {
-  drawer: { 
-    position: 'fixed', 
-    top: 0, 
-    right: 0, 
-    width: '320px', 
+  drawer: {
+    position: 'fixed',
+    top: 0,
+    right: 0,
+    width: '320px',
     height: '100vh',
-    background: 'var(--background, var(--color-bg, #18181b))', 
-    borderLeft: '1px solid var(--border, var(--color-border, #27272a))', 
+    background: 'var(--color-background-primary, #ffffff)',
+    borderLeft: '1px solid var(--color-border-tertiary, #e4e4e7)',
     zIndex: 1000,
-    boxShadow: '-4px 0 24px rgba(0,0,0,0.15)', 
-    display: 'flex', 
-    flexDirection: 'column' 
+    boxShadow: '-4px 0 24px rgba(0,0,0,0.08)',
+    display: 'flex',
+    flexDirection: 'column'
   },
   drawerHeader: { 
     padding: '16px', 
@@ -262,35 +262,35 @@ const s: Record<string, React.CSSProperties> = {
     alignItems: 'center', 
     justifyContent: 'space-between' 
   },
-  drawerTitle: { 
-    fontSize: '14px', 
-    fontWeight: 500, 
-    color: 'var(--color-text, #fff)' 
+  drawerTitle: {
+    fontSize: '14px',
+    fontWeight: 500,
+    color: 'var(--color-text-primary, #18181b)'
   },
-  drawerSub: { 
-    fontSize: '11px', 
-    color: 'var(--color-text-secondary, #a1a1aa)', 
-    marginTop: '2px' 
+  drawerSub: {
+    fontSize: '11px',
+    color: 'var(--color-text-secondary, #71717a)',
+    marginTop: '2px'
   },
-  closeBtn: { 
-    background: 'none', 
-    border: 'none', 
-    color: 'var(--color-text-secondary, #52525b)', 
-    cursor: 'pointer', 
+  closeBtn: {
+    background: 'none',
+    border: 'none',
+    color: 'var(--color-text-secondary, #71717a)',
+    cursor: 'pointer',
     padding: '4px',
     display: 'flex',
     alignItems: 'center'
   },
-  uploadZone: { 
-    padding: '8px', 
-    background: 'var(--color-btn-secondary-bg, #27272a)', 
-    border: '1px solid var(--border, var(--color-border, #3f3f46))', 
-    borderRadius: '6px', 
-    color: 'var(--color-text, #f4f4f5)', 
-    fontSize: '12px', 
-    display: 'flex', 
-    alignItems: 'center', 
-    justifyContent: 'center', 
+  uploadZone: {
+    padding: '8px',
+    background: 'var(--color-background-secondary, #f4f4f5)',
+    border: '1px solid var(--color-border-tertiary, #e4e4e7)',
+    borderRadius: '6px',
+    color: 'var(--color-text-primary, #18181b)',
+    fontSize: '12px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
     gap: '6px',
     width: '100%'
   },
@@ -317,21 +317,21 @@ const s: Record<string, React.CSSProperties> = {
     flexDirection: 'column', 
     gap: '4px' 
   },
-  docItem: { 
-    display: 'flex', 
-    alignItems: 'center', 
-    justifyContent: 'space-between', 
-    padding: '8px 10px', 
-    background: 'var(--card, var(--color-card-bg, #27272a))', 
-    borderRadius: '8px', 
-    border: '1px solid var(--border, var(--color-border, #3f3f46))' 
+  docItem: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '8px 10px',
+    background: 'var(--color-background-primary, #ffffff)',
+    borderRadius: '8px',
+    border: '1px solid var(--color-border-tertiary, #e4e4e7)'
   },
-  docName: { 
-    fontSize: '11px', 
-    color: 'var(--color-text, #e4e4e7)', 
-    whiteSpace: 'nowrap', 
-    overflow: 'hidden', 
-    textOverflow: 'ellipsis' 
+  docName: {
+    fontSize: '11px',
+    color: 'var(--color-text-primary, #18181b)',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis'
   },
   docMeta: { 
     fontSize: '9px', 
