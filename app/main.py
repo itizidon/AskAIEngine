@@ -4,6 +4,7 @@ from typing import List, Tuple
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import get_db
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from app.routes.auth import router as auth_router
 from app.models import Business, User, Document, QueryLog, Organization, OrgMember
 from app.rag import (
@@ -24,6 +25,7 @@ from pydantic import BaseModel
 from app.auth import get_current_user
 import os
 import uuid
+from datetime import datetime, timezone
 from math import ceil
 
 
@@ -86,6 +88,31 @@ app.add_middleware(
 )
 app.include_router(auth_router)
 
+def enforce_business_quota(db: Session, business_id: int, user_id: int):
+    # 1. Fetch the business and organization ownership framework
+    business = db.query(Business).filter(Business.id == business_id).first()
+    if not business:
+        raise HTTPException(status_code=404, detail="Business profile not found")
+        
+    org = db.query(Organization).filter(Organization.id == business.org_id).first()
+    billing_owner = db.query(User).filter(User.id == org.owner_id).first()
+    
+    # 2. Derive the 30-day window anchor
+    start_of_period = billing_owner.stripe_current_period_start or billing_owner.created_at
+    if not start_of_period:
+        start_of_period = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0)
+
+    # 3. Check business-specific usage
+    business_usage = db.query(func.count(QueryLog.id)).filter(
+        QueryLog.business_id == business_id,
+        QueryLog.created_at >= start_of_period
+    ).scalar() or 0
+    
+    if business_usage >= business.query_allocation:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This location workspace has exhausted its allocated search quota for the billing period."
+        )
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def get_business_doc_state(db: Session, business_id: int) -> dict:
@@ -459,6 +486,52 @@ def ask_question(
         },
     }
 
+@app.get("/auth/usage-metrics")
+async def get_comprehensive_usage_metrics(
+    org_id: int,
+    current_auth = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    user, _ = current_auth
+    org = db.query(Organization).filter(Organization.id == org_id).first()
+    is_owner = (org.owner_id == user.id)
+
+    # Resolve billing dates based on owner anchor
+    billing_owner = user if is_owner else db.query(User).filter(User.id == org.owner_id).first()
+    start_of_period = billing_owner.stripe_current_period_start or billing_owner.created_at
+
+    # 1. Fetch global stats
+    total_combined_usage = db.query(func.count(QueryLog.id)).filter(
+        QueryLog.org_id == org_id, QueryLog.created_at >= start_of_period
+    ).scalar() or 0
+
+    personal_user_usage = db.query(func.count(QueryLog.id)).filter(
+        QueryLog.org_id == org_id, QueryLog.user_id == user.id, QueryLog.created_at >= start_of_period
+    ).scalar() or 0
+
+    # 2. Fetch specific business-level allocations and current counts
+    businesses = db.query(Business).filter(Business.org_id == org_id).all()
+    business_breakdown = []
+    
+    for biz in businesses:
+        biz_count = db.query(func.count(QueryLog.id)).filter(
+            QueryLog.business_id == biz.id, QueryLog.created_at >= start_of_period
+        ).scalar() or 0
+        
+        business_breakdown.append({
+            "id": biz.id,
+            "name": biz.name,
+            "allocation": biz.query_allocation,
+            "usage": biz_count
+        })
+
+    return {
+        "is_owner": is_owner,
+        "max_queries_allowed": PLAN_CONFIG.get(billing_owner.plan.lower(), PLAN_CONFIG["free"]).get("monthly_searches", 50),
+        "total_combined_usage": total_combined_usage,
+        "personal_user_usage": personal_user_usage,
+        "businesses": business_breakdown
+    }
 
 @app.post(
     "/organizations", 

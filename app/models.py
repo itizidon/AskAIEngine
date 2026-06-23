@@ -70,6 +70,7 @@ class User(Base):
     plan                    = Column(String, nullable=False, default="free")  # free/starter/pro/business
     stripe_customer_id      = Column(String, nullable=True)
     stripe_subscription_id  = Column(String, nullable=True)
+    stripe_current_period_start = Column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     # Changed uselist=True since an upgraded plan allows owning multiple workspaces
@@ -87,6 +88,7 @@ class Business(Base):
     rag_data        = Column(String, nullable=True)
     created_at      = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
+    query_allocation = Column(Integer, nullable=False, default=25) # Default cap per business location
     organization    = relationship("Organization", back_populates="businesses")
     users           = relationship("User", secondary=user_business, back_populates="businesses")
     documents       = relationship("Document", back_populates="business", cascade="all, delete-orphan")

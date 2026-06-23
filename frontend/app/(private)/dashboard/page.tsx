@@ -42,13 +42,28 @@ interface UserProfile {
   max_organizations: number;
 }
 
+interface BusinessMetric {
+  id: number;
+  name: string;
+  allocation: number;
+  usage: number;
+}
+
+interface WorkspaceMetrics {
+  is_owner: boolean;
+  max_queries_allowed: number;
+  total_combined_usage: number;
+  personal_user_usage: number;
+  businesses: BusinessMetric[];
+}
+
 export default function AdminDashboard() {
   const { businesses, selectBusiness, isLoading, refreshBusinesses } = useBusiness();
 
   const [organizations, setOrganizations] = useState<Org[]>([]);
   const [currentOrgId, setCurrentOrgId] = useState<number | null>(null);
   const [isLoadingOrgs, setIsLoadingOrgs] = useState(true);
-  
+
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
 
   const [activeDrawerBiz, setActiveDrawerBiz] = useState<any | null>(null);
@@ -66,6 +81,34 @@ export default function AdminDashboard() {
   const [bizName, setBizName] = useState("");
   const [isCreatingBiz, setIsCreatingBiz] = useState(false);
   const [bizError, setBizError] = useState<string | null>(null);
+
+  const [metricsData, setMetricsData] = useState<WorkspaceMetrics | null>(null);
+  const [isLoadingMetrics, setIsLoadingMetrics] = useState(false);
+
+  // Fetch granular metrics whenever the user switches organizations
+  useEffect(() => {
+    if (!currentOrgId) return;
+
+    const fetchWorkspaceMetrics = async () => {
+      setIsLoadingMetrics(true);
+      try {
+        const res = await fetch(`http://localhost:8000/auth/usage-metrics?org_id=${currentOrgId}`, {
+          method: "GET",
+          credentials: "include",
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setMetricsData(data);
+        }
+      } catch (err) {
+        console.error("Failed to fetch location usage bounds:", err);
+      } finally {
+        setIsLoadingMetrics(false);
+      }
+    };
+
+    fetchWorkspaceMetrics();
+  }, [currentOrgId]);
 
   useEffect(() => {
     const fetchUserDataAndWorkspaces = async () => {
@@ -106,7 +149,7 @@ export default function AdminDashboard() {
 
   // ── Read dynamic tier bounds directly from backend profile response payload ──
   const userPlanKey = userProfile?.plan?.toLowerCase() || 'free';
-  
+
   const maxOrganizationsAllowed = userProfile?.max_organizations ?? 1;
   const isOrgLimitReached = organizations.length >= maxOrganizationsAllowed;
 
@@ -323,37 +366,78 @@ export default function AdminDashboard() {
           </div>
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px', marginBottom: '20px' }}>
-            {filteredBusinesses.map((biz) => (
-              <div className="card" key={biz.id}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
-                  <div style={{ fontSize: '14px', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <Building2 size={14} style={{ color: 'var(--color-text-secondary)' }} />
-                    {biz.name}
+            {filteredBusinesses.map((biz) => {
+              // ── Step 4 Addition A: Calculate progress percentages for this specific mapped business ──
+              const match = metricsData?.businesses?.find((b: any) => b.id === biz.id);
+              const bizUsage = match?.usage ?? 0;
+              const bizAlloc = match?.allocation ?? 25; // Safe default fallback
+              const bizPercent = Math.min(Math.round((bizUsage / bizAlloc) * 100), 100);
+
+              return (
+                <div className="card" key={biz.id}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                    <div style={{ fontSize: '14px', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <Building2 size={14} style={{ color: 'var(--color-text-secondary)' }} />
+                      {biz.name}
+                    </div>
+                    <span className="badge badge-success">Active</span>
                   </div>
-                  <span className="badge badge-success">Active</span>
+
+                  {/* ── Step 4 Addition B: Injected Local Business Progress Bar ── */}
+                  <div style={{ margin: '12px 0 6px 0' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--color-text-secondary)', marginBottom: '4px' }}>
+                      <span>Branch Allocation</span>
+                      <span>{bizUsage} / {bizAlloc} queries</span>
+                    </div>
+                    <div style={{ width: '100%', height: '6px', background: 'var(--color-background-secondary, #e4e4e7)', borderRadius: '3px', overflow: 'hidden' }}>
+                      <div
+                        style={{
+                          width: `${bizPercent}%`,
+                          height: '100%',
+                          background: bizPercent > 85 ? '#ef4444' : 'var(--color-primary, #4f46e5)',
+                          transition: 'width 0.3s ease'
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '6px', marginTop: '12px' }}>
+                    <Link href="/search" className="btn" style={{ flex: 1, justifyContent: 'center', fontSize: '12px' }} onClick={() => selectBusiness(biz)}>
+                      Open Search
+                    </Link>
+                    <button className="btn btn-secondary" style={{ flex: 1, justifyContent: 'center', fontSize: '12px' }} onClick={() => openManagementDrawer(biz)}>
+                      Manage Files
+                    </button>
+                  </div>
                 </div>
-                <div style={{ display: 'flex', gap: '6px', marginTop: '12px' }}>
-                  <Link href="/search" className="btn" style={{ flex: 1, justifyContent: 'center', fontSize: '12px' }} onClick={() => selectBusiness(biz)}>
-                    Open Search
-                  </Link>
-                  <button className="btn btn-secondary" style={{ flex: 1, justifyContent: 'center', fontSize: '12px' }} onClick={() => openManagementDrawer(biz)}>
-                    Manage Files
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
-
         {/* Global Performance Metrics */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
+          {metricsData?.is_owner ? (
+            // ── BILL PAYER VIEW: Total Shared Pool Progress ──
+            <MetricCard
+              label="Account usage this month"
+              value={String(metricsData.total_combined_usage)}
+              subtext={`${metricsData.total_combined_usage} / ${metricsData.max_queries_allowed} total pool queries · ${userPlanKey.toUpperCase()} plan`}
+              progressPercentage={Math.min(Math.round((metricsData.total_combined_usage / metricsData.max_queries_allowed) * 100), 100)}
+            />
+          ) : (
+            // ── COLLABORATOR VIEW: Flat Individual Activity Tracker ──
+            <MetricCard
+              label="Your searches this month"
+              value={String(metricsData?.personal_user_usage ?? 0)}
+              subtext="Queries executed by your personal seat profile"
+            />
+          )}
+
           <MetricCard
-            label="Searches this month"
-            value="340"
-            subtext={`340 / 500 · ${userPlanKey.toUpperCase()} account plan`}
-            progressPercentage={68}
+            label="Total active instances"
+            value={String(filteredBusinesses.length)}
+            subtext={`Connected locations (${filteredBusinesses.length} / ${maxBusinessesAllowed})`}
           />
-          <MetricCard label="Total active instances" value={String(filteredBusinesses.length)} subtext={`Connected workspaces (${filteredBusinesses.length} / ${maxBusinessesAllowed})`} />
         </div>
       </div>
 

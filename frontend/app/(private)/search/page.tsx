@@ -33,6 +33,7 @@ export default function SearchHome() {
       const response = await fetch("http://localhost:8000/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include", // 👈 MAKE SURE THIS LINE IS HERE
         body: JSON.stringify({
           question: query,
           business_id: selectedBusiness.id,
@@ -50,6 +51,8 @@ export default function SearchHome() {
       setLoading(false);
     }
   };
+
+  console.log(result,'this is results')
 
   return (
     <div className="screen" style={{ position: 'relative' }}>
@@ -132,7 +135,7 @@ export default function SearchHome() {
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', marginBottom: '10px' }}>
               <MessageSquare size={16} style={{ color: 'var(--color-text-info)', marginTop: '2px' }} />
               <div style={{ fontSize: '13px', fontWeight: 500, color: 'var(--color-text-primary)', lineHeight: '1.4' }}>
-                {result.answer}
+                {result?.answer?.answers}
               </div>
             </div>
             {result.sources.length > 0 && (
