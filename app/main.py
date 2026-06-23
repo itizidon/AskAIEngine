@@ -41,6 +41,7 @@ class AskRequest(BaseModel):
 
 class CreateBusinessRequest(BaseModel):
     name: str
+    org_id: int  # <-- ADD THIS LINE
 
 class BusinessResponse(BaseModel):
     id:   int
@@ -97,15 +98,32 @@ def read_root():
 
 @app.post("/upload-multiple")
 async def upload_documents(
-    business_id:     int            = Form(...),
-    current_context: User           = Depends(get_current_user),
+    business_id:     int              = Form(...),
+    current_context: User             = Depends(get_current_user),
     files:           List[UploadFile] = File(...),
-    db:              Session        = Depends(get_db),
+    db:              Session          = Depends(get_db),
 ):
     user, _ = current_context
-    business = db.query(Business).filter(Business.id == business_id).first()
+
+    # 1. Fetch organization IDs the user belongs to
+    user_org_ids = [
+        membership.org_id for membership in db.query(OrgMember)
+        .filter(OrgMember.user_id == user.id)
+        .all()
+    ]
+
+    # 2. Verify the target business exists AND belongs to one of those authorized organizations
+    business = (
+        db.query(Business)
+        .filter(Business.id == business_id, Business.org_id.in_(user_org_ids))
+        .first()
+    )
+    
     if not business:
-        return {"error": "Business not found"}
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Business not found or you are not authorized to access it."
+        )
 
     uploaded = []
     for file in files:
@@ -150,8 +168,23 @@ async def get_documents(
     current_auth          = Depends(get_current_user),
 ):
     user, _ = current_auth
-    allowed_business_ids = {b.id for b in user.businesses}
+    
+    # 1. Fetch the organization IDs the user belongs to
+    user_org_ids = [
+        membership.org_id for membership in db.query(OrgMember)
+        .filter(OrgMember.user_id == user.id)
+        .all()
+    ]
+    
+    # 2. Grab all business IDs mapped to those organizations
+    allowed_businesses = (
+        db.query(Business.id)
+        .filter(Business.org_id.in_(user_org_ids))
+        .all()
+    )
+    allowed_business_ids = {b.id for b in allowed_businesses}
 
+    # 3. Validate requested business IDs against the allowed set
     for requested_id in payload.business_ids:
         if requested_id not in allowed_business_ids:
             raise HTTPException(
@@ -159,6 +192,7 @@ async def get_documents(
                 detail=f"Not authorized to view business ID: {requested_id}",
             )
 
+    # 4. Handle pagination offset and fetch records
     offset = (payload.page - 1) * payload.page_size
     query_results = (
         db.query(Document)
@@ -169,6 +203,7 @@ async def get_documents(
         .all()
     )
 
+    # 5. Format results cleanly for the frontend client drawer
     formatted_docs = []
     for doc in query_results:
         ext = doc.filename.split(".")[-1].upper() if "." in doc.filename else "FILE"
@@ -185,8 +220,35 @@ def get_my_businesses(
     current_user          = Depends(get_current_user),
 ):
     user, _ = current_user
+    
+    # 1. Get all organization IDs where the user is a member
+    # (Using your OrgMember model from your business creation validation rule)
+    user_org_ids = [
+        membership.org_id for membership in db.query(OrgMember)
+        .filter(OrgMember.user_id == user.id)
+        .all()
+    ]
+    
+    if not user_org_ids:
+        return {"businesses": []}
+        
+    # 2. Query all businesses tied to those specific organizations
+    db_businesses = (
+        db.query(Business)
+        .filter(Business.org_id.in_(user_org_ids))
+        .all()
+    )
+    
+    # 3. Return the payload with org_id included so the frontend context matches correctly
     return {
-        "businesses": [{"id": b.id, "name": b.name} for b in user.businesses]
+        "businesses": [
+            {
+                "id": b.id, 
+                "name": b.name,
+                "org_id": b.org_id  # Crucial for frontend b.org_id?.toString() check
+            } 
+            for b in db_businesses
+        ]
     }
 
 
@@ -469,12 +531,45 @@ async def create_organization(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to provision system workspace metadata safely: {str(e)}"
         )
+    
+@app.get(
+    "/organizations", 
+    response_model=List[OrgResponseSchema], 
+    status_code=status.HTTP_200_OK
+)
+async def get_user_organizations(
+    db: Session = Depends(get_db), 
+    current_auth = Depends(get_current_user)
+):
+    """
+    Retrieves all organizations that the authenticated user belongs to
+    by checking the OrgMember membership roster.
+    """
+    user, _ = current_auth
+    
+    try:
+        # Query organizations by joining on the OrgMember junction table
+        # This securely limits rows to ONLY what this specific user is part of
+        user_orgs = (
+            db.query(Organization)
+            .join(OrgMember, OrgMember.org_id == Organization.id)
+            .filter(OrgMember.user_id == user.id)
+            .all()
+        )
+        
+        return user_orgs
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to query user workspace membership profiles safely: {str(e)}"
+        )
 
 @app.post("/businesses", response_model=BusinessResponse)
 def create_business_route(
-    body:         CreateBusinessRequest,
-    db:           Session = Depends(get_db),
-    current_user          = Depends(get_current_user),
+    body: CreateBusinessRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
 ):
     user, _ = current_user
     
@@ -482,22 +577,33 @@ def create_business_route(
     if not business_name:
         raise HTTPException(status_code=400, detail="Business name is required")
 
-    # Check org exists and plan allows more businesses
-    org = db.query(Organization).filter(Organization.owner_id == user.id).first()
+    # 2. Securely verify the user belongs to the requested org_id via the junction table
+    membership = (
+        db.query(OrgMember)
+        .filter(OrgMember.org_id == body.org_id, OrgMember.user_id == user.id)
+        .first()
+    )
+    if not membership:
+        raise HTTPException(
+            status_code=403, 
+            detail="You do not have permission to modify this organization workspace"
+        )
+
+    # 3. Grab the specific organization details
+    org = db.query(Organization).filter(Organization.id == body.org_id).first()
     if not org:
-        raise HTTPException(status_code=402, detail="Subscription required to create businesses")
+        raise HTTPException(status_code=404, detail="Organization not found")
 
     if not org.is_active:
         raise HTTPException(status_code=402, detail="Your subscription is inactive")
 
+    # Optional: Insert your plan business count limit checking logic here if needed
+
+    # 4. Bind the business explicitly to the targeted org_id
     business = Business(name=business_name, org_id=org.id)
     db.add(business)
     db.commit()
     db.refresh(business)
-
-    user.businesses.append(business)
-    db.commit()
-    db.refresh(current_user)
 
     return business
 

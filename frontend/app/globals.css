@@ -59,3 +59,7 @@ input[type=text] { width: 100%; padding: 8px 12px; border: 0.5px solid var(--col
 .avatar { width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 500; flex-shrink: 0; background: var(--color-background-info); color: var(--color-text-info); }
 .modal-overlay { position: relative; background: rgba(0,0,0,0.05); display: flex; align-items: center; justify-content: center; padding: 40px; min-height: 420px; border-radius: var(--border-radius-lg); }
 .modal { background: var(--color-background-primary); border-radius: var(--border-radius-lg); border: 0.5px solid var(--color-border-tertiary); padding: 24px; max-width: 380px; width: 100%; }
+.group:hover .group-hover\:opacity-100, /* Tailored tailwind compatibility catch */
+.group:hover div {
+  opacity: 1 !important;
+}
