@@ -16,25 +16,19 @@ user_business = Table(
 
 class Organization(Base):
     """
-    The paying entity. One admin creates an org when they subscribe.
-    All businesses, users, and search quota belong to the org.
+    An isolated enterprise workspace containment layer. 
+    Limits are derived dynamically from the owner's active plan tier.
     """
     __tablename__ = "organizations"
 
     id            = Column(Integer, primary_key=True, index=True)
     name          = Column(String, nullable=False)
     owner_id      = Column(Integer, ForeignKey("users.id"), nullable=False)
-
-    # Subscription
-    plan          = Column(String, nullable=False, default="free")  # free/starter/pro/business
     is_active     = Column(Boolean, nullable=False, default=True)
-    stripe_customer_id      = Column(String, nullable=True)   # for Stripe integration later
-    stripe_subscription_id  = Column(String, nullable=True)
-
     created_at    = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     # Relationships
-    owner         = relationship("User", foreign_keys=[owner_id], back_populates="owned_org")
+    owner         = relationship("User", foreign_keys=[owner_id], back_populates="owned_orgs")
     businesses    = relationship("Business", back_populates="organization", cascade="all, delete-orphan")
     members       = relationship("OrgMember", back_populates="organization", cascade="all, delete-orphan")
     query_logs    = relationship("QueryLog", back_populates="organization")
@@ -43,8 +37,6 @@ class Organization(Base):
 class OrgMember(Base):
     """
     Tracks every user who belongs to an org (admin or not).
-    Separate from user_business — this is org-level membership,
-    user_business is business-level access.
     """
     __tablename__ = "org_members"
 
@@ -61,6 +53,10 @@ class OrgMember(Base):
 
 
 class User(Base):
+    """
+    The main billing and access entity. Subscription tiers live here, 
+    controlling global organization creation caps.
+    """
     __tablename__ = "users"
 
     id              = Column(Integer, primary_key=True, index=True)
@@ -70,8 +66,14 @@ class User(Base):
     role            = Column(String, default="user")   # global role: superadmin / user
     created_at      = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
+    # Subscription properties shifted to the User level
+    plan                    = Column(String, nullable=False, default="free")  # free/starter/pro/business
+    stripe_customer_id      = Column(String, nullable=True)
+    stripe_subscription_id  = Column(String, nullable=True)
+
     # Relationships
-    owned_org       = relationship("Organization", foreign_keys="Organization.owner_id", back_populates="owner", uselist=False)
+    # Changed uselist=True since an upgraded plan allows owning multiple workspaces
+    owned_orgs      = relationship("Organization", foreign_keys="Organization.owner_id", back_populates="owner")
     org_memberships = relationship("OrgMember", foreign_keys="OrgMember.user_id", back_populates="user")
     businesses      = relationship("Business", secondary=user_business, back_populates="users")
 
@@ -123,12 +125,13 @@ class QueryLog(Base):
     __tablename__ = "query_logs"
 
     id              = Column(Integer, primary_key=True, index=True)
-    org_id          = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)  # ← tracks against subscription
+    org_id          = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
     business_id     = Column(Integer, ForeignKey("businesses.id"),    nullable=False, index=True)
-    user_id         = Column(Integer, ForeignKey("users.id"),         nullable=False, index=True)  # ← who asked it
+    user_id         = Column(Integer, ForeignKey("users.id"),         nullable=False, index=True)
     query_text      = Column(Text, nullable=False)
+    hyde_response   = Column(Text, nullable=True) # Stored raw hypothetical text expansion
     answer          = Column(JSONB, nullable=False)
-    retrieval_plan  = Column(String, nullable=True)   # which tier was used: basic/hyde/multiquery
+    retrieval_plan  = Column(String, nullable=True)
     created_at      = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     organization    = relationship("Organization", back_populates="query_logs")

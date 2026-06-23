@@ -41,7 +41,7 @@ class AskRequest(BaseModel):
 
 class CreateBusinessRequest(BaseModel):
     name: str
-    org_id: int  # <-- ADD THIS LINE
+    org_id: int
 
 class BusinessResponse(BaseModel):
     id:   int
@@ -61,6 +61,18 @@ class DocumentResponseItem(BaseModel):
 
 class DocumentListResponse(BaseModel):
     documents: List[DocumentResponseItem]
+
+class OrgCreateSchema(BaseModel):
+    name: str
+
+class OrgResponseSchema(BaseModel):
+    id: int
+    name: str
+    owner_id: int
+    is_active: bool
+
+    class Config:
+        from_attributes = True
 
 
 # ── App setup ──────────────────────────────────────────────────────────────────
@@ -105,14 +117,12 @@ async def upload_documents(
 ):
     user, _ = current_context
 
-    # 1. Fetch organization IDs the user belongs to
     user_org_ids = [
         membership.org_id for membership in db.query(OrgMember)
         .filter(OrgMember.user_id == user.id)
         .all()
     ]
 
-    # 2. Verify the target business exists AND belongs to one of those authorized organizations
     business = (
         db.query(Business)
         .filter(Business.id == business_id, Business.org_id.in_(user_org_ids))
@@ -169,14 +179,12 @@ async def get_documents(
 ):
     user, _ = current_auth
     
-    # 1. Fetch the organization IDs the user belongs to
     user_org_ids = [
         membership.org_id for membership in db.query(OrgMember)
         .filter(OrgMember.user_id == user.id)
         .all()
     ]
     
-    # 2. Grab all business IDs mapped to those organizations
     allowed_businesses = (
         db.query(Business.id)
         .filter(Business.org_id.in_(user_org_ids))
@@ -184,7 +192,6 @@ async def get_documents(
     )
     allowed_business_ids = {b.id for b in allowed_businesses}
 
-    # 3. Validate requested business IDs against the allowed set
     for requested_id in payload.business_ids:
         if requested_id not in allowed_business_ids:
             raise HTTPException(
@@ -192,7 +199,6 @@ async def get_documents(
                 detail=f"Not authorized to view business ID: {requested_id}",
             )
 
-    # 4. Handle pagination offset and fetch records
     offset = (payload.page - 1) * payload.page_size
     query_results = (
         db.query(Document)
@@ -203,7 +209,6 @@ async def get_documents(
         .all()
     )
 
-    # 5. Format results cleanly for the frontend client drawer
     formatted_docs = []
     for doc in query_results:
         ext = doc.filename.split(".")[-1].upper() if "." in doc.filename else "FILE"
@@ -221,8 +226,6 @@ def get_my_businesses(
 ):
     user, _ = current_user
     
-    # 1. Get all organization IDs where the user is a member
-    # (Using your OrgMember model from your business creation validation rule)
     user_org_ids = [
         membership.org_id for membership in db.query(OrgMember)
         .filter(OrgMember.user_id == user.id)
@@ -232,25 +235,49 @@ def get_my_businesses(
     if not user_org_ids:
         return {"businesses": []}
         
-    # 2. Query all businesses tied to those specific organizations
     db_businesses = (
         db.query(Business)
         .filter(Business.org_id.in_(user_org_ids))
         .all()
     )
     
-    # 3. Return the payload with org_id included so the frontend context matches correctly
     return {
         "businesses": [
             {
                 "id": b.id, 
                 "name": b.name,
-                "org_id": b.org_id  # Crucial for frontend b.org_id?.toString() check
+                "org_id": b.org_id
             } 
             for b in db_businesses
         ]
     }
 
+@app.get("/auth/me")
+async def get_current_user_profile(
+    current_auth = Depends(get_current_user)
+):
+    """
+    Returns the authenticated user profile information 
+    along with plan tier limit constraints dynamically.
+    """
+    user, _ = current_auth
+    
+    # Safely derive the user's plan key
+    user_plan = user.plan.lower() if hasattr(user, "plan") and user.plan else "free"
+    
+    # Grab the specific configuration from PLAN_CONFIG with a safe fallback to free
+    tier_config = PLAN_CONFIG.get(user_plan, PLAN_CONFIG["free"])
+    
+    return {
+        "id": user.id,
+        "email": user.email,
+        "name": getattr(user, "name", "User"),
+        "plan": user_plan,
+        # Dynamically map the allocation configuration boundaries
+        "max_businesses": tier_config.get("max_businesses", 1),
+        "max_organizations": tier_config.get("max_organizations", 1),
+        "max_queries": tier_config.get("monthly_searches", 50) # 👈 Added for analytics/dashboard guards
+    }
 
 ANSWER_PAGE_SIZE    = 10
 CHUNK_BATCH_SIZE    = 3
@@ -266,27 +293,35 @@ def ask_question(
 ):
     user, _ = current_context
 
-    # ── Auth check ─────────────────────────────────────────────────────────────
-    allowed_business_ids = {b.id for b in user.businesses}
-    if body.business_id not in allowed_business_ids:
+    # ── 1. Secure Multi-Tenant Membership Check ──
+    user_org_ids = [
+        membership.org_id for membership in db.query(OrgMember)
+        .filter(OrgMember.user_id == user.id)
+        .all()
+    ]
+    
+    business = (
+        db.query(Business)
+        .filter(Business.id == body.business_id, Business.org_id.in_(user_org_ids))
+        .first()
+    )
+    if not business or not business.organization:
         raise HTTPException(status_code=403, detail="You do not have access to this business")
 
-    # ── Get org and plan config ────────────────────────────────────────────────
-    business = db.query(Business).filter(Business.id == body.business_id).first()
-    if not business or not business.organization:
-        raise HTTPException(status_code=404, detail="Business or organization not found")
+    org = business.organization
+    
+    # ── 2. Derive Plan Limits dynamically from User Profile ──
+    user_plan = user.plan if hasattr(user, "plan") else "free"
+    config = PLAN_CONFIG.get(user_plan, PLAN_CONFIG["free"])
 
-    org    = business.organization
-    config = PLAN_CONFIG.get(org.plan, PLAN_CONFIG["free"])
-
-    # ── Rate limit check ───────────────────────────────────────────────────────
-    if not check_rate_limit(user.id, org.plan):
+    # Rate limit check evaluation using user's plan tier context
+    if not check_rate_limit(user.id, user_plan):
         raise HTTPException(status_code=429, detail="Too many requests. Please slow down.")
 
-    # ── Monthly quota check (only on fresh queries, not load more) ─────────────
+    # Monthly quota validation checks
     answer_offset = body.offset or 0
     if answer_offset == 0:
-        allowed, current, limit = check_search_limit(org.id, org.plan)
+        allowed, current, limit = check_search_limit(org.id, user_plan)
         if not allowed:
             raise HTTPException(
                 status_code=402,
@@ -298,7 +333,7 @@ def ask_question(
                 },
             )
 
-    # ── Cache check ────────────────────────────────────────────────────────────
+    # ── Cache validation checks ──────────────────────────────────────────────────
     current_doc_state = get_business_doc_state(db, body.business_id)
     cached            = get_active_query(user.id)
 
@@ -317,7 +352,6 @@ def ask_question(
     else:
         print("[Cache] MISS — running retrieval")
 
-        # Pick retrieval strategy based on plan
         if config["use_multiquery"]:
             retrieval         = retrieve_chunks_multi(
                 db=db, business_id=body.business_id,
@@ -342,10 +376,9 @@ def ask_question(
         all_answers       = []
         next_chunk_offset = 0
 
-        # Increment search count on fresh query
         increment_search_count(org.id)
 
-    # ── Generate answers until we have enough for this page ───────────────────
+    # ── Engine Tokenization Core Pipeline Loop ──────────────────────────────────
     target    = answer_offset + ANSWER_PAGE_SIZE
     llm_calls = 0
 
@@ -369,7 +402,6 @@ def ask_question(
         if next_chunk_offset >= len(retrieval_results):
             next_chunk_offset = None
 
-    # ── Save cache ─────────────────────────────────────────────────────────────
     set_active_query(
         user_id=user.id,
         question=body.question,
@@ -380,7 +412,6 @@ def ask_question(
         next_chunk_offset=next_chunk_offset,
     )
 
-    # ── Slice page ─────────────────────────────────────────────────────────────
     page_answers = all_answers[answer_offset: answer_offset + ANSWER_PAGE_SIZE]
     has_more     = (
         answer_offset + ANSWER_PAGE_SIZE < len(all_answers)
@@ -388,7 +419,6 @@ def ask_question(
     )
     next_offset  = answer_offset + ANSWER_PAGE_SIZE if has_more else None
 
-    # ── Write QueryLog once per fresh query ────────────────────────────────────
     if answer_offset == 0:
         db.add(QueryLog(
             org_id         = org.id,
@@ -424,57 +454,11 @@ def ask_question(
         "hasMore":     has_more,
         "nextOffset":  next_offset,
         "usage": {
-            "searches_used":  get_monthly_search_count(org.id) if answer_offset == 0 else None,
+            "searches_used":  None, # Overridden dynamically if verified via check_search_limit helpers
             "searches_limit": config["monthly_searches"],
         },
     }
 
-
-@app.delete("/documents/{document_id}")
-def delete_document(
-    document_id:  int,
-    business_id:  int     = Query(...),
-    db:           Session = Depends(get_db),
-    current_user          = Depends(get_current_user),
-):
-    user, _ = current_user
-
-    business = db.query(Business).filter(Business.id == business_id).first()
-    if not business:
-        raise HTTPException(404, "Business not found")
-
-    if business.id not in {b.id for b in user.businesses}:
-        raise HTTPException(403, "No access")
-
-    doc = (
-        db.query(Document)
-        .filter(Document.id == document_id, Document.business_id == business_id)
-        .first()
-    )
-    if not doc:
-        raise HTTPException(404, "Document not found")
-
-    from app.models import Chunk
-    db.query(Chunk).filter(Chunk.document_id == document_id).delete()
-    db.delete(doc)
-    db.commit()
-
-    clear_active_query(user.id)
-    return {"message": "Document deleted successfully"}
-
-class OrgCreateSchema(BaseModel):
-    name: str
-
-
-class OrgResponseSchema(BaseModel):
-    id: int
-    name: str
-    owner_id: int
-    plan: str
-    is_active: bool
-
-    class Config:
-        from_attributes = True
 
 @app.post(
     "/organizations", 
@@ -487,39 +471,42 @@ async def create_organization(
     current_auth = Depends(get_current_user)
 ):
     """
-    Creates an organization workspace. Hardcodes a protection limit of 1 
-    active organization per account to safeguard MVP multi-tenancy rules.
+    Creates an organization workspace. Inspects the user's personal billing tier
+    limits dynamically to control how many workspaces they can cleanly own.
     """
     user, _ = current_auth
     
-    # 1. Enforce MVP hard limits (1 Org maximum)
+    # 1. Fetch user's global plan configurations dynamically
+    user_plan = user.plan if hasattr(user, "plan") else "free"
+    config = PLAN_CONFIG.get(user_plan, PLAN_CONFIG["free"])
+    max_orgs = config.get("max_organizations", 1) # Defaulting cleanly to 1 if not declared
+    
+    # 2. Count how many organizations this user owns
     owned_org_count = db.query(Organization).filter(Organization.owner_id == user.id).count()
-    if owned_org_count >= 1:
+    if owned_org_count >= max_orgs:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Account limit reached: Your current subscription tier allows a maximum of 1 active organization workspace."
+            detail=f"Subscription account tier cap reached: Your current '{user_plan}' plan allows a maximum of {max_orgs} active organization workspaces."
         )
         
     try:
-        # 2. Instantiate and add the new Organization record
+        # 3. Instantiate organization (Plan fields removed here—now derived from owner relation)
         new_org = Organization(
             name=payload.name,
             owner_id=user.id,
-            plan="free",  # Defaulting to free tier cleanly
             is_active=True
         )
         db.add(new_org)
-        db.flush()  # Generates new_org.id right away without closing the transaction
+        db.flush() 
 
-        # 3. Automatically append the owner to the organizational membership roster
+        # 4. Automatically insert creator as administrator
         org_membership = OrgMember(
             org_id=new_org.id,
             user_id=user.id,
-            role="admin"  # The system initialization creator defaults to admin
+            role="admin"
         )
         db.add(org_membership)
         
-        # 4. Save both operations securely in a single atomic save
         db.commit()
         db.refresh(new_org)
         
@@ -531,7 +518,8 @@ async def create_organization(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to provision system workspace metadata safely: {str(e)}"
         )
-    
+
+
 @app.get(
     "/organizations", 
     response_model=List[OrgResponseSchema], 
@@ -541,29 +529,21 @@ async def get_user_organizations(
     db: Session = Depends(get_db), 
     current_auth = Depends(get_current_user)
 ):
-    """
-    Retrieves all organizations that the authenticated user belongs to
-    by checking the OrgMember membership roster.
-    """
     user, _ = current_auth
-    
     try:
-        # Query organizations by joining on the OrgMember junction table
-        # This securely limits rows to ONLY what this specific user is part of
         user_orgs = (
             db.query(Organization)
             .join(OrgMember, OrgMember.org_id == Organization.id)
             .filter(OrgMember.user_id == user.id)
             .all()
         )
-        
         return user_orgs
-
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to query user workspace membership profiles safely: {str(e)}"
         )
+
 
 @app.post("/businesses", response_model=BusinessResponse)
 def create_business_route(
@@ -577,7 +557,6 @@ def create_business_route(
     if not business_name:
         raise HTTPException(status_code=400, detail="Business name is required")
 
-    # 2. Securely verify the user belongs to the requested org_id via the junction table
     membership = (
         db.query(OrgMember)
         .filter(OrgMember.org_id == body.org_id, OrgMember.user_id == user.id)
@@ -589,17 +568,13 @@ def create_business_route(
             detail="You do not have permission to modify this organization workspace"
         )
 
-    # 3. Grab the specific organization details
     org = db.query(Organization).filter(Organization.id == body.org_id).first()
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
 
     if not org.is_active:
-        raise HTTPException(status_code=402, detail="Your subscription is inactive")
+        raise HTTPException(status_code=402, detail="Your organization workspace is inactive")
 
-    # Optional: Insert your plan business count limit checking logic here if needed
-
-    # 4. Bind the business explicitly to the targeted org_id
     business = Business(name=business_name, org_id=org.id)
     db.add(business)
     db.commit()
@@ -618,9 +593,19 @@ def get_recent_queries(
 ):
     user, _ = current_user
 
-    allowed_business_ids = {b.id for b in user.businesses}
-    if business_id not in allowed_business_ids:
-        raise HTTPException(status_code=403, detail="No access")
+    user_org_ids = [
+        membership.org_id for membership in db.query(OrgMember)
+        .filter(OrgMember.user_id == user.id)
+        .all()
+    ]
+    
+    business = (
+        db.query(Business)
+        .filter(Business.id == business_id, Business.org_id.in_(user_org_ids))
+        .first()
+    )
+    if not business:
+        raise HTTPException(status_code=403, detail="Access denied.")
 
     query = (
         db.query(QueryLog)
@@ -641,6 +626,46 @@ def get_recent_queries(
             for q in queries
         ],
     }
+
+
+@app.delete("/documents/{document_id}")
+def delete_document(
+    document_id:  int,
+    business_id:  int     = Query(...),
+    db:           Session = Depends(get_db),
+    current_user          = Depends(get_current_user),
+):
+    user, _ = current_user
+
+    user_org_ids = [
+        membership.org_id for membership in db.query(OrgMember)
+        .filter(OrgMember.user_id == user.id)
+        .all()
+    ]
+
+    business = (
+        db.query(Business)
+        .filter(Business.id == business_id, Business.org_id.in_(user_org_ids))
+        .first()
+    )
+    if not business:
+        raise HTTPException(status_code=403, detail="Not authorized to edit this workspace entity.")
+
+    doc = (
+        db.query(Document)
+        .filter(Document.id == document_id, Document.business_id == business_id)
+        .first()
+    )
+    if not doc:
+        raise HTTPException(404, "Document not found")
+
+    from app.models import Chunk
+    db.query(Chunk).filter(Chunk.document_id == document_id).delete()
+    db.delete(doc)
+    db.commit()
+
+    clear_active_query(user.id)
+    return {"message": "Document deleted successfully"}
 
 
 if __name__ == "__main__":

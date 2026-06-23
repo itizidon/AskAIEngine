@@ -9,12 +9,6 @@ import { useBusiness } from '@/app/context/BusinessContext';
 
 const ACCEPTED_TYPES = ".pdf,.txt,.md,.docx,.csv,.xlsx,.xls";
 
-const PLAN_LIMITS: Record<string, { max_organizations: number }> = {
-  free: { max_organizations: 1 },
-  starter: { max_organizations: 1 },
-  pro: { max_organizations: 1 },
-};
-
 const badgeColor: Record<string, { bg: string; color: string }> = {
   PDF: { bg: '#fee2e2', color: '#ef4444' },
   TXT: { bg: '#fef3c7', color: '#d97706' },
@@ -36,7 +30,16 @@ interface Doc {
 interface Org {
   id: number;
   name: string;
+  is_active: boolean;
+}
+
+interface UserProfile {
+  id: number;
+  email: string;
+  name: string;
   plan: string;
+  max_businesses: number;
+  max_organizations: number;
 }
 
 export default function AdminDashboard() {
@@ -45,6 +48,8 @@ export default function AdminDashboard() {
   const [organizations, setOrganizations] = useState<Org[]>([]);
   const [currentOrgId, setCurrentOrgId] = useState<number | null>(null);
   const [isLoadingOrgs, setIsLoadingOrgs] = useState(true);
+  
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
 
   const [activeDrawerBiz, setActiveDrawerBiz] = useState<any | null>(null);
   const [drawerDocs, setDrawerDocs] = useState<Doc[]>([]);
@@ -63,34 +68,57 @@ export default function AdminDashboard() {
   const [bizError, setBizError] = useState<string | null>(null);
 
   useEffect(() => {
-    const fetchOrganizations = async () => {
+    const fetchUserDataAndWorkspaces = async () => {
       try {
-        const res = await fetch("http://localhost:8000/organizations", {
+        // 1. Fetch Auth Profile containing the backend calculated allocations
+        const userRes = await fetch("http://localhost:8000/auth/me", {
           method: "GET",
           credentials: "include",
         });
-        if (!res.ok) throw new Error();
-        const data = await res.json();
-        setOrganizations(data);
-        if (data.length > 0) {
-          setCurrentOrgId(data[0].id);
+        if (userRes.ok) {
+          const userData = await userRes.json();
+          setUserProfile(userData);
+        }
+
+        // 2. Query multi-tenant Organization memberships
+        const orgRes = await fetch("http://localhost:8000/organizations", {
+          method: "GET",
+          credentials: "include",
+        });
+        if (!orgRes.ok) throw new Error();
+        const orgData = await orgRes.json();
+        setOrganizations(orgData);
+        if (orgData.length > 0) {
+          setCurrentOrgId(orgData[0].id);
         }
       } catch (err) {
-        console.error("Failed to retrieve organizational profiles", err);
+        console.error("Failed to retrieve organizational framework snapshot", err);
       } finally {
         setIsLoadingOrgs(false);
       }
     };
 
-    fetchOrganizations();
+    fetchUserDataAndWorkspaces();
     setIsMounted(true);
   }, []);
 
   const activeOrg = organizations.find(o => o.id === currentOrgId);
 
+  // ── Read dynamic tier bounds directly from backend profile response payload ──
+  const userPlanKey = userProfile?.plan?.toLowerCase() || 'free';
+  
+  const maxOrganizationsAllowed = userProfile?.max_organizations ?? 1;
+  const isOrgLimitReached = organizations.length >= maxOrganizationsAllowed;
+
+  const maxBusinessesAllowed = userProfile?.max_businesses ?? 1;
+  const filteredBusinesses = businesses.filter(
+    b => b.org_id?.toString() === currentOrgId?.toString()
+  );
+  const isBizLimitReached = filteredBusinesses.length >= maxBusinessesAllowed;
+
   const handleCreateOrganization = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!orgName.trim()) return;
+    if (!orgName.trim() || isOrgLimitReached) return;
     setIsCreatingOrg(true);
     setOrgError(null);
     try {
@@ -115,7 +143,7 @@ export default function AdminDashboard() {
 
   const handleCreateBusiness = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!bizName.trim() || !currentOrgId) return;
+    if (!bizName.trim() || !currentOrgId || isBizLimitReached) return;
 
     setIsCreatingBiz(true);
     setBizError(null);
@@ -206,10 +234,6 @@ export default function AdminDashboard() {
     }
   };
 
-  const filteredBusinesses = businesses.filter(
-    b => b.org_id?.toString() === currentOrgId?.toString()
-  );
-
   return (
     <div className="screen" style={{ position: 'relative', overflowX: 'hidden' }}>
       <Navbar />
@@ -244,36 +268,51 @@ export default function AdminDashboard() {
           </div>
 
           <div style={{ display: 'flex', gap: '8px' }}>
+            {/* New Org Button */}
             <div style={{ position: 'relative', display: 'inline-block' }} className="group">
               <button
                 className="btn btn-secondary"
                 onClick={() => setIsOrgModalOpen(true)}
-                disabled={organizations.length >= (PLAN_LIMITS[activeOrg?.plan?.toLowerCase() || 'free']?.max_organizations ?? 1)}
+                disabled={isOrgLimitReached}
                 style={{
                   fontSize: '13px',
-                  opacity: organizations.length >= (PLAN_LIMITS[activeOrg?.plan?.toLowerCase() || 'free']?.max_organizations ?? 1) ? 0.5 : 1,
-                  cursor: organizations.length >= (PLAN_LIMITS[activeOrg?.plan?.toLowerCase() || 'free']?.max_organizations ?? 1) ? 'not-allowed' : 'pointer'
+                  opacity: isOrgLimitReached ? 0.5 : 1,
+                  cursor: isOrgLimitReached ? 'not-allowed' : 'pointer'
                 }}
               >
                 <Plus size={14} /> New organization
               </button>
 
-              {organizations.length >= (PLAN_LIMITS[activeOrg?.plan?.toLowerCase() || 'free']?.max_organizations ?? 1) && (
+              {isOrgLimitReached && (
                 <div style={s.tooltip}>
-                  Your current {activeOrg?.plan.toUpperCase() || 'FREE'} tier is restricted to {PLAN_LIMITS[activeOrg?.plan?.toLowerCase() || 'free']?.max_organizations} active organization workspace.
+                  Your current account profile tier ({userPlanKey.toUpperCase()}) is restricted to {maxOrganizationsAllowed} organization workspace.
                   <div style={s.tooltipArrow} />
                 </div>
               )}
             </div>
 
-            <button
-              className="btn btn-primary"
-              style={{ fontSize: '13px' }}
-              onClick={() => setIsBizModalOpen(true)}
-              disabled={isMounted ? !currentOrgId : false}
-            >
-              <Plus size={14} /> New business
-            </button>
+            {/* New Business Button */}
+            <div style={{ position: 'relative', display: 'inline-block' }} className="group">
+              <button
+                className="btn btn-primary"
+                style={{
+                  fontSize: '13px',
+                  opacity: (isMounted ? !currentOrgId : false) || isBizLimitReached ? 0.5 : 1,
+                  cursor: (isMounted ? !currentOrgId : false) || isBizLimitReached ? 'not-allowed' : 'pointer'
+                }}
+                onClick={() => setIsBizModalOpen(true)}
+                disabled={(isMounted ? !currentOrgId : false) || isBizLimitReached}
+              >
+                <Plus size={14} /> New business
+              </button>
+
+              {isBizLimitReached && (
+                <div style={s.tooltip}>
+                  Your current account profile tier ({userPlanKey.toUpperCase()}) is restricted to {maxBusinessesAllowed} connected database {maxBusinessesAllowed === 1 ? 'workspace' : 'workspaces'}.
+                  <div style={s.tooltipArrow} />
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -311,10 +350,10 @@ export default function AdminDashboard() {
           <MetricCard
             label="Searches this month"
             value="340"
-            subtext={`340 / 500 · ${activeOrg ? activeOrg.plan.toUpperCase() : 'FREE'} plan`}
+            subtext={`340 / 500 · ${userPlanKey.toUpperCase()} account plan`}
             progressPercentage={68}
           />
-          <MetricCard label="Total active instances" value={String(filteredBusinesses.length)} subtext="Connected database workspaces" />
+          <MetricCard label="Total active instances" value={String(filteredBusinesses.length)} subtext={`Connected workspaces (${filteredBusinesses.length} / ${maxBusinessesAllowed})`} />
         </div>
       </div>
 
