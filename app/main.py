@@ -21,7 +21,7 @@ from app.rag import (
     PLAN_CONFIG,
 )
 from app.llm import generate_answer
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from app.auth import get_current_user
 import os
 import uuid
@@ -34,6 +34,10 @@ class DocumentsRequest(BaseModel):
     business_ids: List[int]
     page: int = 1
     page_size: int = 10
+
+class BusinessSettingsUpdate(BaseModel):
+    business_id: int = Field(..., description="The unique ID of the business being updated")
+    query_allocation: int = Field(..., ge=0, description="The maximum number of allowed searches")
 
 class AskRequest(BaseModel):
     question:    str
@@ -279,6 +283,62 @@ def get_my_businesses(
         ]
     }
 
+# Updated route to a static path, pulling everything from the body payload
+@app.patch("/businesses/settings")
+async def update_business_settings(
+    settings_data: BusinessSettingsUpdate,
+    current_auth = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    user, _ = current_auth
+
+    # 1. Look up the business target using the body data
+    business = db.query(Business).filter(Business.id == settings_data.business_id).first()
+    if not business:
+        raise HTTPException(status_code=404, detail="Business profile location not found.")
+
+    # 2. Authorization guard: Verify user belongs to the parent organization workspace
+    org = db.query(Organization).filter(Organization.id == business.org_id).first()
+    if not org or org.owner_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="Unauthorized: Only the workspace workspace owner can change resource allocations."
+        )
+
+    # 3. Apply changes and commit transaction record pipeline
+    plan_limit = PLAN_CONFIG.get(user.plan.lower(), PLAN_CONFIG["free"]).get("monthly_searches", 50)
+    
+    # Calculate the current allocated pool across ALL businesses owned by this user
+    # We join Organization to ensure we match the owner_id across potentially multiple workspaces
+    total_currently_allocated = (
+        db.query(func.sum(Business.query_allocation))
+        .join(Organization, Business.org_id == Organization.id)
+        .filter(Organization.owner_id == user.id)
+        .scalar() or 0
+    )
+    
+    # Calculate what the new grand total would be if we accept this patch request
+    projected_total_allocation = (total_currently_allocated - business.query_allocation) + settings_data.query_allocation
+    
+    if projected_total_allocation > plan_limit:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Allocation limit exceeded. Your plan allow maximum {plan_limit} queries across all locations. "
+                   f"Requested changes would bring your total allocated workspace pool to {projected_total_allocation}."
+        )
+
+    business.query_allocation = settings_data.query_allocation
+    
+    db.add(business)
+    db.commit()
+    db.refresh(business)
+
+    return {
+        "message": "Business resource settings updated successfully.", 
+        "business_id": business.id,
+        "query_allocation": business.query_allocation
+    }
+
 @app.get("/auth/me")
 async def get_current_user_profile(
     current_auth = Depends(get_current_user)
@@ -494,12 +554,17 @@ async def get_comprehensive_usage_metrics(
 ):
     user, _ = current_auth
     org = db.query(Organization).filter(Organization.id == org_id).first()
+    if not org:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Organization context workspace not found.")
     is_owner = (org.owner_id == user.id)
+
 
     # Resolve billing dates based on owner anchor
     billing_owner = user if is_owner else db.query(User).filter(User.id == org.owner_id).first()
-    start_of_period = billing_owner.stripe_current_period_start or billing_owner.created_at
-
+    
+    # Gold standard: use Stripe period anchor. Fallback: dynamic start of current month.
+    start_of_period = billing_owner.stripe_current_period_start if (billing_owner and billing_owner.stripe_current_period_start) else datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     # 1. Fetch global stats
     total_combined_usage = db.query(func.count(QueryLog.id)).filter(
         QueryLog.org_id == org_id, QueryLog.created_at >= start_of_period

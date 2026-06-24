@@ -132,10 +132,13 @@ export default function EnterpriseBusinessDetail() {
     setIsSavingSettings(true);
     setSettingsError(null);
     try {
-      const res = await fetch(`http://localhost:8000/businesses/${selectedBusiness.id}/settings`, {
+      const res = await fetch(`http://localhost:8000/businesses/settings`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query_allocation: Number(localAlloc) }),
+        body: JSON.stringify({ 
+          business_id: selectedBusiness.id, // Pulled from your local/context storage
+          query_allocation: Number(localAlloc) 
+        }),
         credentials: "include",
       });
       if (!res.ok) {
