@@ -14,7 +14,6 @@ export default function SignInPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [businessName, setBusinessName] = useState("");
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -32,7 +31,7 @@ export default function SignInPage() {
       const body =
         mode === "login"
           ? new URLSearchParams({ username: email.trim(), password })
-          : JSON.stringify({ name: name.trim(), email: email.trim(), password, businessName });
+          : JSON.stringify({ name: name.trim(), email: email.trim(), password });
 
       const res = await fetch(url, {
         method: "POST",
@@ -109,22 +108,6 @@ export default function SignInPage() {
                 value={name}
                 onChange={e => setName(e.target.value)}
                 placeholder="Jane Doe"
-                className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
-              />
-            </div>
-          )}
-          {mode === "signup" && (
-            <div>
-              <label htmlFor="business" className="mb-1 block text-sm font-medium text-zinc-800 dark:text-zinc-200">
-                Business Name
-              </label>
-              <input
-                id="business"
-                type="text"
-                autoComplete="organization"
-                value={businessName}
-                onChange={e => setBusinessName(e.target.value)}
-                placeholder="Jane's Pharmacy"
                 className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
               />
             </div>

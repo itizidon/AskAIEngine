@@ -6,9 +6,10 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   return (
     <ProtectedLayout>
       <Providers>
-        <BusinessGate>
+        {children}
+        {/* <BusinessGate>
           {children}
-        </BusinessGate>
+        </BusinessGate> */}
       </Providers>
     </ProtectedLayout>
   );

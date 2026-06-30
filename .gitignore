@@ -76,3 +76,6 @@ dmypy.json
 
 # FastAPI / Uvicorn / Starlette temp files
 *.pid
+
+app/reset_db.py
+reset_db.py

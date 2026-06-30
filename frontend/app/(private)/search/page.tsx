@@ -1,477 +1,175 @@
-"use client";
+'use client';
 
-import { useBusiness } from "@/app/context/BusinessContext";
-import { useState, useRef, useEffect } from "react";
+import { useState } from 'react';
+import Link from 'next/link';
+import { Search, ChevronDown, History, Clock, Loader2, Building2, MessageSquare, ArrowRight } from 'lucide-react';
+import { useBusiness } from '@/app/context/BusinessContext';
 
-const ACCEPTED_TYPES = ".pdf,.txt,.md,.docx,.csv,.xlsx,.xls";;
-
-interface Doc {
-  id: string; // temporary frontend ID
-  backendId?: string; // actual backend document ID
-  name: string;
-  type: string;
-  status?: "pending" | "processing" | "ready" | "failed";
-  preview?: string;
+interface RagResponse {
+  answer: string;
+  sources: string[];
+  chunks_used: number;
 }
 
-function fileExt(name: string) {
-  return name.split(".").pop()?.toUpperCase() ?? "FILE";
-}
+export default function SearchHome() {
+  // 1. Consume the real active business from your global state context
+  const { selectedBusiness, businesses, selectBusiness } = useBusiness();
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
 
-const badgeColor: Record<string, { bg: string; color: string }> = {
-  PDF: { bg: "#ef444422", color: "#ef4444" },
-  DOCX: { bg: "#3b82f622", color: "#3b82f6" },
-  TXT: { bg: "#22c55e22", color: "#22c55e" },
-  MD: { bg: "#a78bfa22", color: "#a78bfa" },
-  CSV: { bg: "#f59e0b22", color: "#f59e0b" },
-  IMG: { bg: "#22c55e22", color: "#22c55e" }, // image placeholder
-};
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
-export default function DashboardSearchMock() {
-  const { selectedBusiness } = useBusiness();
-  const businessName = selectedBusiness?.name
-  const [docs, setDocs] = useState<Doc[]>([]);
-  const [question, setQuestion] = useState("");
-  const [answer, setAnswer] = useState("");
-  const [page, setPage] = useState(1);
-  const [uploading, setUploading] = useState(false);
+  // 2. Local states for interactive input and querying
+  const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [offset, setOffset] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
-  const [sources, setSources] = useState<{ id: number; filename: string }[]>([]);
-  console.log(docs)
-  // ── Fetch documents with merge to avoid overwriting pending files ──
-  useEffect(() => {
-    const fetchDocuments = async () => {
-      try {
-        const res = await fetch(`${API_BASE}/documents`, {
-          method: "POST",
-          credentials: "include",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            business_ids: [selectedBusiness?.id],
-            page: 1,
-            page_size: 10,
-          }),
-        });
-        const data = await res.json();
-        console.log(data, 'dataaa')
-        const fetchedDocs: Doc[] = data?.documents?.map((doc: any) => ({
-          id: doc.id.toString(), // frontend key
-          backendId: doc.id.toString(), // backend ID
-          name: doc.name,
-          type: doc.type ?? "FILE",
-          status: "ready",
-        })) || [];
+  const [result, setResult] = useState<RagResponse | null>(null);
 
-
-        setDocs(prev => {
-          const pendingOrProcessing = prev.filter(d => d.status !== "ready");
-          return [...fetchedDocs, ...pendingOrProcessing];
-        });
-      } catch (err) {
-        console.error("Failed to fetch documents:", err);
-      }
-    };
-
-    fetchDocuments();
-  }, [page]);
-
+  // 3. Form submit handler pointing to your POST /ask endpoint
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
-
-    if (!question.trim()) return;
-
-    if (!selectedBusiness) {
-      alert("Please select a business first");
-      return;
-    }
+    if (!query.trim() || !selectedBusiness) return;
 
     setLoading(true);
-    setAnswer("");
-
-    const initialOffset = 0;
-    setOffset(0);
+    setResult(null);
 
     try {
-      const res = await fetch(
-        "http://localhost:8000/ask",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          credentials: "include",
-          body: JSON.stringify({
-            question,
-            business_id: selectedBusiness.id,
-            get_k: 3,
-            offset: initialOffset,
-          }),
-        }
-      );
-
-      const data = await res.json();
-
-      console.log(data, 'this is data');
-
-      setAnswer(data.answer.answers);
-      setSources(data.sources || []);
-      setHasMore(data.hasMore ?? false);
-    } catch (err) {
-      console.error(err);
-      setAnswer(
-        "Something went wrong while searching."
-      );
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleLoadMore = async () => {
-    if (!question.trim()) return;
-
-    setLoading(true);
-
-    const nextOffset = offset + 3; // match get_k
-
-    try {
-      const res = await fetch("http://localhost:8000/ask", {
+      const response = await fetch("http://localhost:8000/ask", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include", // 👈 MAKE SURE THIS LINE IS HERE
         body: JSON.stringify({
-          question,
-          get_k: 3,
-          offset: nextOffset,
-          business_id: selectedBusiness?.id,
-        }),
+          question: query,
+          business_id: selectedBusiness.id,
+          get_k: 5,
+          offset: 0
+        })
       });
 
-      if (!res.ok) {
-        throw new Error("Failed to fetch answer");
-      }
-
-      const data = await res.json();
-      console.log(data, 'this is answer')
-      console.log(answer, "answer")
-      setAnswer([...answer, ...data?.answer?.answers]);
-      setSources(data.sources || []);
-
-      // 🔥 update offset AFTER success
-      setOffset(nextOffset);
-
-      // optional: backend should control this
-      setHasMore(data.hasMore ?? false);
-
+      if (!response.ok) throw new Error("Search execution failed");
+      const data = await response.json();
+      setResult(data);
     } catch (err) {
-      console.error(err);
-      setAnswer("Something went wrong while searching.");
+      console.error("RAG Error:", err);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-
-    setError("");
-    setUploading(true);
-
-    try {
-      const formData = new FormData();
-      const tempDocs: Doc[] = Array.from(files).map(file => {
-        const tempId = crypto.randomUUID(); // unique frontend ID
-        const isImage = file.type.startsWith("image/");
-        formData.append("files", file);
-        formData.append("business_id", selectedBusiness.id.toString());
-        return {
-          id: tempId,
-          name: file.name,
-          type: isImage ? "IMG" : fileExt(file.name),
-          status: "processing",
-          preview: isImage ? URL.createObjectURL(file) : undefined,
-        };
-      });
-
-      // Optimistically add to state
-      setDocs(prev => [...prev, ...tempDocs]);
-
-      const res = await fetch("http://localhost:8000/upload-multiple", {
-        method: "POST",
-        body: formData,
-        credentials: "include",
-      });
-
-      if (!res.ok) throw new Error("Upload failed");
-
-      const data = await res.json(); // { uploaded: [{ filename, document_id }] }
-
-      // Map backend results to optimistic docs by index
-      setDocs(prev =>
-        prev.map(doc => {
-          if (doc.status !== "processing") return doc;
-          const match = data.uploaded.find((u: any) => u.filename === doc.name && !prev.some(d => d.backendId === u.document_id));
-          return match
-            ? { ...doc, status: "ready", backendId: match.document_id }
-            : { ...doc, status: "failed" };
-        })
-      );
-    } catch (err) {
-      console.error(err);
-      setDocs(prev =>
-        prev.map(doc =>
-          doc.status === "processing" ? { ...doc, status: "failed" } : doc
-        )
-      );
-      setError("Upload failed. Please try again.");
-    } finally {
-      setUploading(false);
-      if (fileRef.current) fileRef.current.value = "";
-    }
-  };
-
-  const removeDoc = async (doc: Doc) => {
-    if (!doc.backendId) {
-      console.warn("No backendId yet, cannot delete");
-      return;
-    }
-
-    try {
-      await fetch(`http://localhost:8000/documents/${doc.backendId}`, {
-        method: "DELETE",
-        credentials: "include",
-      });
-
-      setDocs(prev => prev.filter(d => d.id !== doc.id));
-
-    } catch (err) {
-      console.error("Delete failed", err);
-    }
-  };
+  console.log(result,'this is results')
 
   return (
-    <div style={s.shell}>
-      {/* Hidden file input */}
-      <input
-        ref={fileRef}
-        type="file"
-        accept={ACCEPTED_TYPES}
-        multiple
-        style={{ display: "none" }}
-        onChange={handleFileChange}
-      />
+    <div className="screen" style={{ position: 'relative' }}>
+      {/* Navbar with Scaled Business Switcher */}
+      <div className="nav" style={{ overflow: 'visible' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', position: 'relative' }}>
+          <button 
+            className="btn" 
+            style={{ fontSize: '13px', padding: '5px 10px', display: 'flex', alignItems: 'center', gap: '6px' }}
+            onClick={() => setIsDropdownOpen(!isDropdownOpen)}
+          >
+            <Building2 size={13} style={{ color: 'var(--color-text-secondary)' }} />
+            {selectedBusiness ? selectedBusiness.name : "Select Business"} <ChevronDown size={12} />
+          </button>
 
-      {/* Sidebar */}
-      <div style={s.sidebar}>
-        <div style={s.sideTop}>
-          <div style={s.logo}>⬡ DocChat</div>
-          <div style={s.plan}>STARTER</div>
+          {isDropdownOpen && (
+            <div style={{
+              position: 'absolute', top: 'calc(100% + 4px)', left: 0, width: '220px',
+              background: 'var(--color-background-primary)', border: '0.5px solid var(--color-border-secondary)',
+              borderRadius: 'var(--border-radius-md)', boxShadow: '0 4px 12px rgba(0,0,0,0.08)', zIndex: 100, padding: '4px'
+            }}>
+              {businesses.map((biz) => (
+                <button
+                  key={biz.id}
+                  style={{
+                    width: '100%', textAlign: 'left', padding: '6px 10px', border: 'none', borderRadius: '4px',
+                    fontSize: '12px', background: selectedBusiness?.id === biz.id ? 'var(--color-background-secondary)' : 'transparent',
+                    cursor: 'pointer'
+                  }}
+                  onClick={() => {
+                    selectBusiness(biz);
+                    setIsDropdownOpen(false);
+                    setResult(null); // Clear previous results upon swapping domains
+                  }}
+                >
+                  {biz.name}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-
-        <div style={s.sideSection}>Documents</div>
-
-        <button
-          style={{ ...s.uploadBtn, opacity: uploading ? 0.7 : 1 }}
-          onClick={() => !uploading && fileRef.current?.click()}
-          disabled={uploading}
-        >
-          {uploading ? "Uploading…" : "+ Upload file"}
-        </button>
-
-        {error && <div style={s.errorMsg}>{error}</div>}
-
-        <div style={s.docList}>
-          {docs.length === 0 && <p style={s.emptyMsg}>No documents yet</p>}
-          {docs.map(doc => {
-            const badge = badgeColor[doc.type] ?? { bg: "#6b6b7822", color: "#6b6b78" };
-            return (
-              <div key={doc.id} style={s.docItem}>
-                <div style={{ ...s.docBadge, background: badge.bg, color: badge.color }}>
-                  {doc.type}
-                </div>
-                <div style={s.docInfo}>
-                  <div style={s.docName}>{doc.name}</div>
-                  <div style={s.docMeta}>
-                    {doc.status === "pending" && "⏳ Pending"}
-                    {doc.status === "processing" && "⚙️ Processing"}
-                    {doc.status === "ready" && "✅ Ready"}
-                    {doc.status === "failed" && "❌ Failed"}
-                  </div>
-                </div>
-                <button style={s.delBtn} onClick={() => removeDoc(doc)}>×</button>
-              </div>
-            );
-          })}
-        </div>
-
-        <div style={s.sideBottom}>
-          <button style={s.logoutBtn}>Sign out</button>
+        <div className="nav-right">
+          <button className="nav-link" style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><History size={13} /> History</button>
+          <div className="avatar">BS</div>
         </div>
       </div>
 
-      {/* Main */}
-      <div style={s.main}>
-        <div className="flex h-full w-full flex-col items-center justify-center">
-          <div className="mb-8">
-            <h1 className="text-5xl font-bold text-blue-600 text-center">
-              {businessName || "Loading..."}
-            </h1>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '40px 24px', gap: '24px' }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: '22px', fontWeight: 500, marginBottom: '6px' }}>What do you want to know?</div>
+          <div style={{ fontSize: '13px', color: 'var(--color-text-secondary)' }}>
+            Search across documents in <span style={{ fontWeight: 600, color: 'var(--color-text-info)' }}>{selectedBusiness?.name || "your business"}</span>
           </div>
-
-          <form
-            onSubmit={handleSearch}
-            className="flex w-full max-w-xl items-center rounded-full border border-gray-700 bg-gray-800 px-4 py-2 shadow-sm focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-500"
-          >
-            <input
-              type="text"
-              placeholder="Search your documents..."
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              className="flex-1 bg-transparent outline-none text-gray-100 placeholder-gray-400"
-            />
-            <button
-              type="submit"
-              className="ml-2 rounded-full bg-blue-600 px-4 py-1 text-white hover:bg-blue-700"
-            >
-              Search
-            </button>
-          </form>
-          {/* Loading State */}
-          {loading && (
-            <div className="mt-6 w-full max-w-2xl text-gray-400 animate-pulse text-sm">
-              Thinking...
-            </div>
-          )}
-
-          {/* Answer Card */}
-          {answer?.length > 0 && (
-            <>
-              <div
-                className="
-    mt-8
-    w-full
-    max-w-4xl
-    flex-1
-    min-h-0
-    overflow-y-auto
-    space-y-4
-    pr-2
-  "
-              >
-                {answer.map(
-                  (item: any, index: number) => (
-                    <div
-                      key={index}
-                      className="
-            rounded-2xl
-            border
-            border-zinc-800
-            bg-zinc-900
-            p-5
-            shadow-lg
-          "
-                    >
-                      <div className="text-white leading-relaxed">
-                        {item.fact}
-                      </div>
-
-                      <div className="mt-4">
-                        <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
-                          Sources
-                        </div>
-
-                        <div className="space-y-2">
-                          {item.sources.map(
-                            (source: any, sourceIndex: number) => (
-                              <div
-                                key={sourceIndex}
-                                className="
-                      flex
-                      items-center
-                      justify-between
-                      rounded-lg
-                      bg-zinc-800
-                      px-3
-                      py-2
-                      text-sm
-                    "
-                              >
-                                <span className="text-zinc-200">
-                                  {source.filename}
-                                </span>
-
-                                <span className="rounded bg-blue-600 px-2 py-1 text-xs text-white">
-                                  {source.chunk}
-                                </span>
-                              </div>
-                            )
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )
-                )}
-              </div>
-              {hasMore && (
-                <div className="mt-4 flex justify-center">
-                  <button
-                    onClick={handleLoadMore}
-                    disabled={loading}
-                    className="
-              rounded-xl
-              bg-blue-600
-              px-5
-              py-2
-              text-white
-              font-medium
-              hover:bg-blue-700
-              disabled:opacity-50
-            "
-                  >
-                    {loading ? "Loading..." : "Load More"}
-                  </button>
-                </div>
-              )}
-            </>
-          )}
-          <p style={s.supportedTypes}>
-            Supported: PDF, DOCX, TXT, MD, CSV, XLSX, XLS — max 10MB
-          </p>
         </div>
+
+        {/* Dynamic Search Form Wrapper */}
+        <form onSubmit={handleSearch} style={{ display: 'flex', alignItems: 'center', gap: '10px', width: '100%', maxWidth: '520px', padding: '6px 10px 6px 14px', border: '0.5px solid var(--color-border-secondary)', borderRadius: '40px', background: 'var(--color-background-primary)' }}>
+          <Search size={16} style={{ color: 'var(--color-text-tertiary)' }} />
+          <input 
+            type="text" 
+            placeholder="Ask anything about your documents…" 
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            disabled={!selectedBusiness || loading}
+            style={{ border: 'none', outline: 'none', flex: 1, fontSize: '14px', background: 'transparent', padding: 0 }} 
+          />
+          <button 
+            type="submit" 
+            className="btn btn-primary" 
+            disabled={loading || !query.trim() || !selectedBusiness}
+            style={{ borderRadius: '20px', padding: '6px 16px', fontSize: '13px' }}
+          >
+            {loading ? <Loader2 className="animate-spin" size={14} /> : "Search"}
+          </button>
+        </form>
+
+        {/* Workspace Display Area: Renders the RAG output if available */}
+        {result && (
+          <div className="card" style={{ width: '100%', maxWidth: '520px', padding: '16px', borderRadius: 'var(--border-radius-lg)', background: 'var(--color-background-secondary)' }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', marginBottom: '10px' }}>
+              <MessageSquare size={16} style={{ color: 'var(--color-text-info)', marginTop: '2px' }} />
+              <div style={{ fontSize: '13px', fontWeight: 500, color: 'var(--color-text-primary)', lineHeight: '1.4' }}>
+                {result?.answer?.answers}
+              </div>
+            </div>
+            {result.sources.length > 0 && (
+              <div style={{ borderTop: '0.5px solid var(--color-border-tertiary)', paddingTop: '10px', marginTop: '10px' }}>
+                <div style={{ fontSize: '11px', color: 'var(--color-text-tertiary)', fontWeight: 500, marginBottom: '4px' }}>Sources Verified:</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                  {result.sources.map((src, idx) => (
+                    <span key={idx} className="badge badge-success" style={{ fontSize: '10px', padding: '2px 6px' }}>{src}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* History Mock fallback section remains clean */}
+        {!result && (
+          <div style={{ width: '100%', maxWidth: '520px' }}>
+            <div style={{ fontSize: '12px', color: 'var(--color-text-tertiary)', marginBottom: '8px', fontWeight: 500 }}>Recent queries</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+              <button 
+                type="button"
+                className="table-row" 
+                style={{ width: '100%', textAlign: 'left', padding: '8px 10px', borderRadius: 'var(--border-radius-md)', border: 'none', background: 'transparent', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+                onClick={() => setQuery("How much did Dr. Sue charge?")}
+              >
+                <Clock size={14} style={{ color: 'var(--color-text-tertiary)' }} />
+                <span style={{ fontSize: '13px', color: 'var(--color-text-secondary)', flex: 1 }}>How much did Dr. Sue charge?</span>
+                <ArrowRight size={12} style={{ color: 'var(--color-text-tertiary)' }} />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
 }
-
-const s: Record<string, React.CSSProperties> = {
-  shell: { display: "flex", height: "100vh", width: "100vw", fontFamily: "'DM Sans', sans-serif", background: "#18181b", color: "#e4e4e7" },
-  sidebar: { width: 260, display: "flex", flexDirection: "column", flexShrink: 0, borderRight: "1px solid #2a2a30" },
-  sideTop: { padding: "20px 18px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid #2a2a30" },
-  logo: { fontSize: 18, fontWeight: 700, color: "#a78bfa" },
-  plan: { fontSize: 10, fontWeight: 600, background: "#7c3aed22", color: "#a78bfa", padding: "3px 8px", borderRadius: 20, letterSpacing: .06 },
-  sideSection: { fontSize: 11, fontWeight: 600, color: "#6b6b78", letterSpacing: .08, padding: "16px 18px 8px", textTransform: "uppercase" as const },
-  uploadBtn: { margin: "0 12px 10px", padding: "9px 14px", background: "#7c3aed", border: "none", borderRadius: 10, color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 },
-  errorMsg: { margin: "0 12px 8px", padding: "8px 12px", background: "#7f1d1d22", border: "1px solid #7f1d1d", borderRadius: 8, color: "#fca5a5", fontSize: 12 },
-  emptyMsg: { fontSize: 13, color: "#6b6b78", padding: "12px 10px" },
-  docList: { flex: 1, overflowY: "auto" as const, padding: "0 8px" },
-  docItem: { display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderRadius: 8, marginBottom: 2 },
-  docBadge: { fontSize: 10, fontWeight: 700, padding: "3px 6px", borderRadius: 5, flexShrink: 0 },
-  docInfo: { flex: 1, minWidth: 0 },
-  docName: { fontSize: 12, whiteSpace: "nowrap" as const, overflow: "hidden", textOverflow: "ellipsis" },
-  docMeta: { fontSize: 11, marginTop: 2, color: "#6b6b78" },
-  delBtn: { background: "none", border: "none", color: "#6b6b78", cursor: "pointer", fontSize: 16, padding: "0 4px", flexShrink: 0 },
-  sideBottom: { padding: "12px 12px 16px", borderTop: "1px solid #2a2a30" },
-  logoutBtn: { width: "100%", padding: "9px", background: "transparent", border: "1px solid #2a2a30", borderRadius: 8, fontSize: 13, cursor: "pointer", color: "#e4e4e7" },
-  main: { flex: 1, display: "flex", alignItems: "center", justifyContent: "center" },
-  supportedTypes: { marginTop: 16, fontSize: 12, color: "#6b6b78" },
-};
